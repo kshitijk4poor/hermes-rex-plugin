@@ -1,4 +1,15 @@
 name: rex
-version: 1.0.0
-description: "Rex terminal multiplexer integration: tells Hermes which Rex session/pane it runs in (like Rex's Claude Code / Codex SessionStart hook) and ships the rex skill."
+version: 1.1.0
+description: "Rex terminal multiplexer integration: tells Hermes which Rex pane it runs in, shows each session's status in its window title, alerts you when Hermes is waiting, and opens panes that follow subagents and kanban workers."
 author: kshitijk4poor
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - on_session_end
+  - on_human_input_request
+  - on_human_input_resolved
+  - post_tool_call
+  - pre_command
+  - on_session_finalize
+  - subagent_start
+  - on_kanban_worker_spawned

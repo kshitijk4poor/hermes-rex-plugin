@@ -96,7 +96,15 @@ def _session_start_text(env: Mapping[str, str]) -> str:
     if not text:
         return ""
     # Rex's text names its skill by a bare name; Hermes loads plugin skills namespaced.
-    return text + '\n\nIn Hermes, load the Rex guide with skill_view(name="rex:rex").'
+    # Rex only asks for a session label; also label the agent's window (tab), which
+    # `rex window rename LABEL` resolves from REX_BLOCK.
+    return text + (
+        "\n\nWhen you rename the session, also rename your own window with "
+        "`rex window rename <label>`, using the same label. Without a window "
+        "argument it renames the window holding REX_BLOCK, so other windows "
+        "are left alone."
+        '\n\nIn Hermes, load the Rex guide with skill_view(name="rex:rex").'
+    )
 
 
 def _prompt_section(info: Mapping[str, Any]) -> str:

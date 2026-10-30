@@ -1,0 +1,4 @@
+name: rex
+version: 1.0.0
+description: "Rex terminal multiplexer integration: tells Hermes which Rex session/pane it runs in (like Rex's Claude Code / Codex SessionStart hook) and ships the rex skill."
+author: kshitijk4poor

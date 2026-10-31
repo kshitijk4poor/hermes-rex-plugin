@@ -27,6 +27,7 @@ no rex binary, no Rex env, slow/broken rex => nothing happens, never an error.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -50,6 +51,7 @@ DEFAULTS: dict[str, Any] = {
     "subagent_panes": True,      # a pane per delegate_task child, following its transcript
     "kanban_panes": True,        # a pane per kanban worker, following its log
     "pane_linger_seconds": 300,  # how long a finished follower pane stays before it closes
+    "debug": False,              # log every hook call to trace.jsonl in the plugin's data dir
 }
 # A kanban worker opens its pane in the Rex session Hermes was last active in, if this recent.
 _LAST_TARGET_MAX_AGE_S = 12 * 3600
@@ -433,13 +435,45 @@ def _warn_if_passthrough_missing() -> None:
             "'[\"REX_SESSION\",\"REX_BLOCK\",\"REX_SERVER\",\"REX_BIN_DIR\"]'", ", ".join(missing))
 
 
+_TRACE_FIELDS = ("session_id", "session_key", "parent_session_id", "child_session_id", "platform",
+                 "command", "args_raw", "kind", "completed", "interrupted", "failed", "task_id",
+                 "worker_pid", "tool_name")
+
+
+def _trace(hook: str, kw: Mapping[str, Any]) -> None:
+    """With the ``debug`` setting on, append one line per hook call to ``trace.jsonl`` in the plugin's
+    data dir: which ids each hook carries and which pane, if any, it resolved to."""
+    try:
+        target = current_target()
+        row = {"t": round(time.time(), 3), "hook": hook,
+               "bound_block": target.block if target else None,
+               **{k: kw[k] for k in _TRACE_FIELDS if k in kw and kw[k] not in (None, "")}}
+        if "args_raw" in row:
+            row["args_raw"] = str(row["args_raw"])[:80]
+        path = Path(_ctx.state.data_dir) / "trace.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except Exception:
+        logger.debug("rex plugin: trace write failed", exc_info=True)
+
+
+def _traced(hook: str, callback):
+    def wrapper(**kw: Any):
+        if _ctx is not None and setting("debug"):
+            _trace(hook, kw)
+        return callback(**kw)
+    wrapper.__name__ = getattr(callback, "__name__", hook)
+    return wrapper
+
+
 def register(ctx) -> None:
     global _ctx
     _ctx = ctx
     _warn_if_passthrough_missing()
     ctx.register_system_prompt_section("rex.session", _prompt_section)
     for name, callback in HOOKS.items():
-        ctx.register_hook(name, callback)
+        ctx.register_hook(name, _traced(name, callback))
     if _SKILL_PATH.exists():
         ctx.register_skill("rex", _SKILL_PATH, description=(
             "Use the rex CLI to manage Rex sessions, open tabs, arrange panes, run commands, "

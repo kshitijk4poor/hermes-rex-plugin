@@ -116,6 +116,7 @@ def fake_rex(tmp_path, monkeypatch):
 class FakeState:
     def __init__(self):
         self.data = {}
+        self.data_dir = None
 
     def get(self, key, default=None):
         return self.data.get(key, default)
@@ -424,6 +425,23 @@ def test_messaging_platform_hooks_are_ignored(plugin, fake_rex):
     plugin._pre_llm_call(session_id="s1", platform="telegram")
     drain(plugin)
     assert fake_rex.calls() == []
+
+
+def test_debug_trace_records_hook_ids_only(plugin, fake_rex, tmp_path):
+    ctx = plugin.ctx_for_test
+    ctx.state.data_dir = tmp_path / "data"
+    hook = ctx.hooks["pre_llm_call"]
+    hook(session_id="s1", platform="cli", user_message="secret text", conversation_history=[{"x": 1}])
+    assert not (ctx.state.data_dir / "trace.jsonl").exists()  # debug is off by default
+    ctx.settings["debug"] = True
+    hook(session_id="s1", platform="cli", user_message="secret text", conversation_history=[{"x": 1}])
+    ctx.hooks["pre_command"](command="resume", args_raw="abc", session_key="s1", platform="cli")
+    rows = [json.loads(line) for line in (ctx.state.data_dir / "trace.jsonl").read_text().splitlines()]
+    assert [r["hook"] for r in rows] == ["pre_llm_call", "pre_command"]
+    assert rows[0]["session_id"] == "s1" and rows[0]["bound_block"] == "block:a"
+    assert rows[1]["command"] == "resume" and rows[1]["session_key"] == "s1"
+    assert "secret text" not in (ctx.state.data_dir / "trace.jsonl").read_text()
+    drain(plugin)
 
 
 # --- alerts -----------------------------------------------------------------------------------

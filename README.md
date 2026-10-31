@@ -71,6 +71,7 @@ All optional, under `plugins.entries.rex.settings` in `config.yaml`:
 | `subagent_panes` | `true` | A pane per subagent |
 | `kanban_panes` | `true` | A pane per kanban worker |
 | `pane_linger_seconds` | `300` | How long a finished pane stays open |
+| `debug` | `false` | Log every hook call (ids only, no message text) to `trace.jsonl` in the plugin's data dir |
 
 For example: `hermes config set plugins.entries.rex.settings.alerts always`.
 

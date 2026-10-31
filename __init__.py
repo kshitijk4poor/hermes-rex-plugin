@@ -308,7 +308,14 @@ def _resolve_session(ref: str) -> tuple[str, str]:
 
 def _pre_command(command: str = "", args_raw: str = "", session_key: str = "", platform: str = "",
                  **_: Any) -> None:
-    """/title and /resume relabel the window. Hermes' CLI/TUI passes the session id as session_key."""
+    """/title and /resume relabel the window; /quit and /new put it back. Hermes' CLI/TUI passes the
+    session id as session_key."""
+    if command in ("quit", "new"):
+        if str(platform or "") in LOCAL_PLATFORMS and session_key:
+            target = _registry.lookup(session_id=session_key)
+            if target is not None:
+                _session_left(session_key, target)
+        return
     if command not in ("title", "resume") or not (args_raw or "").strip():
         return
     ref = args_raw.strip()
@@ -354,8 +361,14 @@ def _apply_pending_label(target: Target) -> None:
 
 def _on_session_finalize(session_id: str = "", platform: str = "", **_: Any) -> None:
     target = _target_for(session_id=session_id, platform=platform)
-    if target is None:
-        return
+    if target is not None:
+        _session_left(session_id, target)
+
+
+def _session_left(session_id: str, target: Target) -> None:
+    """A Hermes session left this pane: put the window (and, if it was the last, the Rex session)
+    label back. Runs on finalize, and on /quit and /new, which never finalize a session resumed
+    without a new turn."""
     with _children_lock:
         _children.pop(session_id, None)
         _pending_end.pop(session_id, None)

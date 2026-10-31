@@ -410,6 +410,40 @@ def test_resume_when_old_session_ends_during_the_title_lookup(plugin, fake_rex, 
     assert fake_rex.label() == "count-py-files-and-read-readme"
 
 
+def test_quit_after_resume_without_a_turn_restores(plugin, fake_rex, monkeypatch):
+    """The hook sequence a live trace showed: Hermes never finalizes a session resumed without a
+    new turn, but /quit reaches pre_command with that session's id."""
+    monkeypatch.setattr(plugin, "_resolve_session",
+                        lambda ref: ("old-sid", "Count .py files and read README first line #2"))
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._pre_command(command="resume", args_raw="old-sid", session_key="s1", platform="cli")
+    plugin._on_session_finalize(session_id="s1", platform="local")
+    drain(plugin)
+    assert fake_rex.label() == "count-py-files-and-read-readme"
+    plugin._pre_command(command="quit", args_raw="", session_key="old-sid", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
+
+
+def test_new_restores_and_unknown_session_quit_is_ignored(plugin, fake_rex, monkeypatch):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._pre_command(command="quit", args_raw="", session_key="other", platform="cli")
+    plugin._pre_command(command="new", args_raw="", session_key="s1", platform="telegram")
+    drain(plugin)
+    assert fake_rex.label() == "● fix-login"
+    plugin._pre_command(command="new", args_raw="", session_key="s1", platform="cli")
+    plugin._on_session_finalize(session_id="s1", platform="local")  # the normal finalize after it
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
+
+
 def test_title_after_session_ended_does_nothing(plugin, fake_rex, monkeypatch):
     plugin._pre_llm_call(session_id="s1", platform="cli")
     drain(plugin)

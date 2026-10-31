@@ -433,9 +433,14 @@ HOOKS = {
 
 
 def _warn_if_passthrough_missing() -> None:
-    """Without the client-env allowlist the gateway never sees REX_* and the plugin is inert."""
+    """Without the client-env allowlist the gateway never sees REX_* and the plugin is inert.
+
+    Silent when there is no config file at all (``hermes plugins doctor`` registers plugins under an
+    empty temporary HERMES_HOME): nothing is missing from a config that doesn't exist yet."""
     try:
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config import get_config_path, load_config_readonly
+        if not get_config_path().is_file():
+            return
         terminal = (load_config_readonly() or {}).get("terminal") or {}
         listed = set(terminal.get("client_env_passthrough") or [])
     except Exception:

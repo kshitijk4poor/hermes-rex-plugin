@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import stat
 import sys
@@ -453,6 +454,26 @@ def test_title_after_session_ended_does_nothing(plugin, fake_rex, monkeypatch):
     plugin._pre_command(command="title", args_raw="late", session_key="s1", platform="cli")
     drain(plugin)
     assert fake_rex.label() == "fix-login"
+
+
+def test_passthrough_warning_only_for_a_real_config_missing_it(plugin, monkeypatch, tmp_path, caplog):
+    import types
+    cfg_path = tmp_path / "config.yaml"
+    loaded = {}
+    fake = types.SimpleNamespace(get_config_path=lambda: cfg_path, load_config_readonly=lambda: loaded)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.SimpleNamespace(config=fake))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    caplog.set_level(logging.WARNING)
+
+    plugin._warn_if_passthrough_missing()  # no config file (plugins doctor's temp HERMES_HOME)
+    assert "client_env_passthrough" not in caplog.text
+    cfg_path.write_text("model: x\n")
+    plugin._warn_if_passthrough_missing()  # a real config without the allowlist
+    assert "client_env_passthrough is missing REX_SESSION" in caplog.text
+    caplog.clear()
+    loaded["terminal"] = {"client_env_passthrough": list(plugin.REX_VARS)}
+    plugin._warn_if_passthrough_missing()
+    assert "client_env_passthrough" not in caplog.text
 
 
 def test_messaging_platform_hooks_are_ignored(plugin, fake_rex):

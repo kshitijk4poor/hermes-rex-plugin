@@ -48,6 +48,11 @@ FAKE_REX = textwrap.dedent(r'''
         print(json.dumps({"active_window_id": st["active"], "windows": [
             {"window_id": w["id"], "label": w["label"], "focused_block_id": w["blocks"][0],
              "layers": [{"blocks": [{"block_id": b} for b in w["blocks"]]}]} for w in st["windows"]]}))
+    elif args[:1] == ["ls"]:
+        print(json.dumps({"sessions": [{"session_id": "session:s", "label": st["session_label"]}]}))
+    elif cmd == ["session", "rename"]:
+        st["session_label"] = args[-1]
+        save()
     elif args[:1] == ["run"]:
         st["n"] += 1
         block = f"block:new{st['n']}"
@@ -72,7 +77,7 @@ def fake_rex(tmp_path, monkeypatch):
     rex.write_text(FAKE_REX.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1))
     rex.chmod(rex.stat().st_mode | stat.S_IEXEC)
     state = tmp_path / "state.json"
-    state.write_text(json.dumps({"n": 0, "active": "window:a", "windows": [
+    state.write_text(json.dumps({"n": 0, "active": "window:a", "session_label": "tidal-bay", "windows": [
         {"id": "window:a", "label": "fix-login", "blocks": ["block:a"]}]}))
     log = tmp_path / "calls.jsonl"
     log.touch()
@@ -91,6 +96,14 @@ def fake_rex(tmp_path, monkeypatch):
 
         def label(self, wid="window:a"):
             return self.windows()[wid]["label"]
+
+        def state(self):
+            return json.loads(state.read_text())
+
+        def edit(self, fn):
+            st = json.loads(state.read_text())
+            fn(st)
+            state.write_text(json.dumps(st))
 
     return Fake()
 
@@ -169,6 +182,43 @@ def test_prompt_section_skips_messaging_platforms_and_non_rex(plugin, monkeypatc
     assert plugin._prompt_section({"platform": "cli"}) == ""
 
 
+def test_prompt_section_shared_rex_session_names_window_only(plugin, fake_rex):
+    fake_rex.edit(lambda st: st["windows"].append({"id": "window:b", "label": "other", "blocks": ["block:b"]}))
+    text = plugin._prompt_section({"platform": "cli"})
+    assert text.startswith("REX CONTEXT") and "NAMING" not in text  # Rex's session-naming text is off
+    assert "rex window rename <label>" in text and "Don't rename the Rex session" in text
+
+
+# --- the shared Rex session label ---------------------------------------------------------------
+
+def test_session_label_restored_when_last_hermes_chat_ends(plugin, fake_rex, monkeypatch):
+    fake_rex.edit(lambda st: st["windows"].append({"id": "window:b", "label": "other", "blocks": ["block:b"]}))
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    monkeypatch.setenv("REX_BLOCK", "block:b")
+    plugin._pre_llm_call(session_id="s2", platform="cli")
+    drain(plugin)
+    fake_rex.edit(lambda st: st.update(session_label="fix-login"))  # a chat ran `rex session rename`
+    monkeypatch.delenv("REX_SESSION")  # finalize runs outside the turn
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.state()["session_label"] == "fix-login"  # s2 still lives in this Rex session
+    plugin._on_session_finalize(session_id="s2", platform="cli")
+    drain(plugin)
+    assert fake_rex.state()["session_label"] == "tidal-bay"
+
+
+def test_session_label_untouched_when_naming_off(plugin, fake_rex, monkeypatch):
+    plugin.ctx_for_test.settings["session_naming"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    fake_rex.edit(lambda st: st.update(session_label="user-chosen"))
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.state()["session_label"] == "user-chosen"
+    assert not [c for c in fake_rex.calls() if c["args"][:1] == ["ls"]]
+
+
 # --- status titles ----------------------------------------------------------------------------
 
 def test_turn_lifecycle_sets_status_marks(plugin, fake_rex):
@@ -203,6 +253,51 @@ def test_subagent_turns_do_not_touch_parent_title(plugin, fake_rex):
     plugin._on_session_end(session_id="child", platform="cli", completed=True)
     drain(plugin)
     assert fake_rex.label() == "fix-login"
+
+
+def test_done_mark_waits_for_background_subagents(plugin, fake_rex):
+    plugin.ctx_for_test.settings["subagent_panes"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="c1", child_goal="a")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="c2", child_goal="b")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)  # parent turn ends first
+    drain(plugin)
+    assert fake_rex.label() == "● fix-login"
+    plugin._subagent_stop(parent_session_id="s1", child_session_id="c1")
+    drain(plugin)
+    assert fake_rex.label() == "● fix-login"  # c2 still running
+    plugin._subagent_stop(parent_session_id="s1", child_session_id="c2")
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
+
+
+def test_sync_subagents_do_not_delay_done(plugin, fake_rex):
+    plugin.ctx_for_test.settings["subagent_panes"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="c1", child_goal="a")
+    plugin._subagent_stop(parent_session_id="s1", child_session_id="c1")  # finished inside the turn
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
+
+
+def test_interrupted_turn_is_not_held_for_subagents(plugin, fake_rex):
+    plugin.ctx_for_test.settings["subagent_panes"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="c1", child_goal="a")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=False, interrupted=True)
+    drain(plugin)
+    assert fake_rex.label() == "■ fix-login"
+
+
+def test_stale_child_stops_holding_done(plugin, fake_rex, monkeypatch):
+    plugin.ctx_for_test.settings["subagent_panes"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="c1", child_goal="a")
+    monkeypatch.setattr(plugin, "_CHILD_MAX_AGE_S", -1)  # its subagent_stop never came
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
 
 
 def test_model_rename_keeps_status_mark(plugin, fake_rex):

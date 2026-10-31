@@ -181,6 +181,11 @@ class Registry:
         with self._lock:
             self.by_session_id.pop(session_id, None)
 
+    def has_rex_session(self, rex_session: str) -> bool:
+        """True while any remembered Hermes session still lives in Rex session *rex_session*."""
+        with self._lock:
+            return any(t.session == rex_session for t in self.by_session_id.values())
+
 
 def current_session_key() -> str:
     try:

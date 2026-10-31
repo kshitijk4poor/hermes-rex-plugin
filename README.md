@@ -11,19 +11,22 @@ For Hermes sessions started (CLI or TUI) inside a Rex pane:
 - **Session context.** Each new session's system prompt gets Rex's own
   SessionStart text (`rex __internal session-start`): your `REX_SESSION` /
   `REX_BLOCK`, and the instruction to name the Rex session, and the window,
-  after the task. It is rendered once per session and frozen, so prompt
-  caching is unaffected.
+  after the task. If the Rex session already has other windows, Hermes is told
+  to name only its own window, because the session label is shared. It is
+  rendered once per session and frozen, so prompt caching is unaffected.
 - **Skill.** `rex:rex`, a stub that defers to `rex __internal skill`, so the
   guide always matches your installed Rex.
 - **Status in the window title.** `● fix-login` while Hermes works,
   `? fix-login` while it waits for you, then `✓` done, `■` stopped or
   `✗` failed. Only the mark belongs to the plugin; the label stays whatever
-  you or the model set.
+  you or the model set. A turn that leaves background subagents running stays
+  `●` until the last of them stops.
 - **Alerts.** A macOS notification when Hermes waits for a command approval,
   a clarify answer or a sudo password and its pane isn't in view (Rex isn't in
   front, or another pane is focused).
 - **Label sync.** `/title <text>` and `/resume <session>` relabel the window.
-  When the session ends, the window gets back the label it had before.
+  When the session ends, the window gets back the label it had before, and when
+  the last Hermes chat in a Rex session ends, so does the session.
 - **Visible commands.** The agent is told to run dev servers, watchers, log
   tails and long builds in a Rex pane beside its own (`rex run`) instead of a
   hidden background process, and to ask before touching panes it didn't open.

@@ -35,6 +35,8 @@ class Titles:
     def __init__(self) -> None:
         # window id -> the label it had before we first touched it, restored when the session ends.
         self._original: dict[str, str] = {}
+        # rex session id -> its label before any Hermes session in it ran, restored when the last one ends.
+        self._session_original: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def _window(self, target: Target) -> Optional[dict]:
@@ -83,6 +85,34 @@ class Titles:
         new = original if original is not None else strip_status(current)
         if new and new != current:
             self._rename(target, win["window_id"], new)
+
+    # --- the Rex session label (shared by every window in the session) ---
+
+    def session_label(self, target: Target) -> Optional[str]:
+        data = rexcli.run_json(target, "ls", "--json") or {}
+        for sess in data.get("sessions") or []:
+            if sess.get("session_id") == target.session:
+                return str(sess.get("label") or "")
+        return None
+
+    def note_session_label(self, target: Target) -> None:
+        """Remember the Rex session's label the first time a Hermes session in it is seen."""
+        with self._lock:
+            if target.session in self._session_original:
+                return
+        label = self.session_label(target)
+        if label is not None:
+            with self._lock:
+                self._session_original.setdefault(target.session, label)
+
+    def restore_session_label(self, target: Target) -> None:
+        """Put back the Rex session label noted before any Hermes session in it renamed it."""
+        with self._lock:
+            original = self._session_original.pop(target.session, None)
+        if not original:
+            return
+        if self.session_label(target) not in (None, original):
+            rexcli.run(target, "session", "rename", target.session, original)
 
 
 # --- alerts -------------------------------------------------------------------------------------

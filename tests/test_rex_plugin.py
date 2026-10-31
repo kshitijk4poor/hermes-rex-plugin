@@ -35,8 +35,13 @@ FAKE_REX = textwrap.dedent(r'''
         return next(w for w in st["windows"] if block in w["blocks"])
     cmd = args[:2]
     if args[:2] == ["__internal", "session-start"]:
-        naming = "--feature-session-naming=true" in args
-        print("REX CONTEXT" + (" NAMING" if naming else ""))
+        # Like the real Rex: naming on adds the session-naming paragraph; an explicit false
+        # adds a bogus "setup is out of date" paragraph instead.
+        print("REX CONTEXT")
+        if "--feature-session-naming=false" in args:
+            print("\nThe Rex setup for this agent is out of date. Suggest running `rex skill setup`")
+        else:
+            print('\nName the session NAMING. Run `rex session rename "$REX_SESSION" <label>`.')
     elif cmd == ["window", "inspect"]:
         w = window_of(os.environ["REX_BLOCK"])
         print(json.dumps({"window_id": w["id"], "label": w["label"], "focused_block_id": w["blocks"][0]}))
@@ -163,17 +168,25 @@ def drain(plugin):
 
 def test_prompt_section_naming_on_includes_window_rename(plugin):
     text = plugin._prompt_section({"platform": "cli"})
-    assert text.startswith("REX CONTEXT NAMING")
+    assert text.startswith("REX CONTEXT") and "rex session rename" in text
     assert "rex window rename <label>" in text
     assert 'skill_view(name="rex:rex")' in text
     assert "rex run -b \"$REX_BLOCK\"" in text
 
 
-def test_prompt_section_naming_off_passes_flag_and_drops_window_line(plugin):
+def _no_session_naming(text):
+    # Rex's naming paragraph is dropped, and the bogus "out of date" paragraph that Rex prints for
+    # an explicit --feature-session-naming=false never appears.
+    return "rex session rename" not in text and "out of date" not in text and "rex skill setup" not in text
+
+
+def test_prompt_section_naming_off_drops_session_and_window_naming(plugin, fake_rex):
     plugin.ctx_for_test.settings.update(session_naming=False, visible_commands=False, status_titles=False)
     text = plugin._prompt_section({"platform": "cli"})
-    assert text.startswith("REX CONTEXT") and "NAMING" not in text
+    assert text.startswith("REX CONTEXT") and _no_session_naming(text)
     assert "rex window rename" not in text and "rex run" not in text
+    starts = [c["args"] for c in fake_rex.calls() if c["args"][:2] == ["__internal", "session-start"]]
+    assert starts and all("--feature-session-naming=false" not in a for a in starts)
 
 
 def test_prompt_section_skips_messaging_platforms_and_non_rex(plugin, monkeypatch):
@@ -185,7 +198,7 @@ def test_prompt_section_skips_messaging_platforms_and_non_rex(plugin, monkeypatc
 def test_prompt_section_shared_rex_session_names_window_only(plugin, fake_rex):
     fake_rex.edit(lambda st: st["windows"].append({"id": "window:b", "label": "other", "blocks": ["block:b"]}))
     text = plugin._prompt_section({"platform": "cli"})
-    assert text.startswith("REX CONTEXT") and "NAMING" not in text  # Rex's session-naming text is off
+    assert text.startswith("REX CONTEXT") and _no_session_naming(text)
     assert "rex window rename <label>" in text and "Don't rename the Rex session" in text
 
 
@@ -327,12 +340,36 @@ def test_session_finalize_restores_original_label(plugin, fake_rex, monkeypatch)
     assert fake_rex.label() == "fix-login"
 
 
-def test_title_command_relabels_and_keeps_mark(plugin, fake_rex):
+def test_title_command_relabels_and_keeps_mark(plugin, fake_rex, monkeypatch):
     plugin._pre_llm_call(session_id="s1", platform="cli")
-    plugin._pre_command(command="title", args_raw="Fix the OAuth Redirect Loop!", session_key="k",
+    drain(plugin)
+    # Like Hermes' CLI/TUI: slash commands fire outside the turn (no bound env), and session_key
+    # carries the session id.
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._pre_command(command="title", args_raw="Fix the OAuth Redirect Loop!", session_key="s1",
                         platform="cli")
     drain(plugin)
     assert fake_rex.label() == "● fix-the-oauth-redirect-loop"
+
+
+def test_resume_labels_window_after_old_session_restores(plugin, fake_rex, monkeypatch):
+    monkeypatch.setattr(plugin, "_resolve_session",
+                        lambda ref: ("old-sid", "Count .py files and read README first line #2"))
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._pre_command(command="resume", args_raw="old-sid", session_key="s1", platform="cli")
+    plugin._on_session_finalize(session_id="s1", platform="cli")  # Hermes ends s1 after the hook
+    drain(plugin)
+    assert fake_rex.label() == "count-py-files-and-read-readme"
+    # quitting the resumed session before its first turn still finds the pane and restores
+    plugin._on_session_finalize(session_id="old-sid", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
 
 
 def test_messaging_platform_hooks_are_ignored(plugin, fake_rex):

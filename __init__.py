@@ -88,10 +88,18 @@ def setting(key: str) -> Any:
 # --- system prompt ------------------------------------------------------------------------------
 
 def _session_start_text(target: Target, *, naming: bool) -> str:
-    """Rex's own SessionStart context, or '' on any failure."""
+    """Rex's own SessionStart context, or '' on any failure.
+
+    Always fetched with naming on: Rex answers ``--feature-session-naming=false`` with a bogus
+    "setup is out of date, run rex skill setup" paragraph. When session naming isn't wanted, Rex's
+    naming paragraph is dropped here instead.
+    """
     rc, out = rexcli.run(target, "__internal", "session-start", "--agent", "opencode",
-                         f"--feature-session-naming={'true' if naming else 'false'}")
-    return out.strip() if rc == 0 else ""
+                         "--feature-session-naming=true")
+    text = out.strip() if rc == 0 else ""
+    if text and not naming:
+        text = "\n\n".join(p for p in text.split("\n\n") if "rex session rename" not in p)
+    return text
 
 
 def _shares_rex_session(target: Target) -> bool:
@@ -230,6 +238,7 @@ def _on_session_start(session_id: str = "", platform: str = "", **_: Any) -> Non
     target = _target_for(platform=platform)
     if target is not None:
         _remember(target, session_id)
+        _apply_pending_label(target)  # /resume with no finalize of a previous session
 
 
 def _pre_llm_call(session_id: str = "", platform: str = "", parent_session_id: str = "", **_: Any) -> None:
@@ -282,29 +291,52 @@ def _post_tool_call(tool_name: str = "", args: Any = None, session_id: str = "",
         _status(_target_for(session_id=session_id), "busy")
 
 
-def _session_title(ref: str) -> str:
+def _resolve_session(ref: str) -> tuple[str, str]:
+    """``(session_id, title)`` for a /resume argument (an id, id prefix or title); blanks if unknown."""
     try:
         from hermes_state import SessionDB
         db = SessionDB()
         sid = db.resolve_session_id(ref) or db.resolve_session_by_title(ref)
-        return (db.get_session_title(sid) or "") if sid else ""
+        return (sid, db.get_session_title(sid) or "") if sid else ("", "")
     except Exception:
         logger.debug("rex plugin: session title lookup failed", exc_info=True)
-        return ""
+        return "", ""
 
 
 def _pre_command(command: str = "", args_raw: str = "", session_key: str = "", platform: str = "",
                  **_: Any) -> None:
+    """/title and /resume relabel the window. Hermes' CLI/TUI passes the session id as session_key."""
     if command not in ("title", "resume") or not (args_raw or "").strip():
         return
-    target = _target_for(session_key=session_key, platform=platform)
+    target = _target_for(session_id=session_key, session_key=session_key, platform=platform)
     if target is None:
         return
     ref = args_raw.strip()
     if command == "title":
         _worker.submit(lambda: _titles.set_base(target, slug(ref, max_words=6)))
-    else:
-        _worker.submit(lambda: _titles.set_base(target, slug(_session_title(ref), max_words=6)))
+        return
+    sid, title = _resolve_session(ref)
+    if sid:
+        # Its finalize must find this pane even if the user quits before its first turn.
+        _registry.remember(target, session_id=sid)
+    label = slug(title, max_words=6)
+    if label:
+        # /resume finalizes the current session after this hook, and that restores the window's
+        # original label; the resumed session's label goes on after it (see _apply_pending_label).
+        with _pending_lock:
+            _pending_label[target.block] = (label, time.time())
+
+
+_pending_label: dict[str, tuple[str, float]] = {}  # rex block -> (label for the resumed session, at)
+_pending_lock = threading.Lock()
+_PENDING_LABEL_MAX_AGE_S = 120
+
+
+def _apply_pending_label(target: Target) -> None:
+    with _pending_lock:
+        label, at = _pending_label.pop(target.block, ("", 0.0))
+    if label and time.time() - at <= _PENDING_LABEL_MAX_AGE_S:
+        _worker.submit(lambda: _titles.set_base(target, label))
 
 
 def _on_session_finalize(session_id: str = "", platform: str = "", **_: Any) -> None:
@@ -316,6 +348,7 @@ def _on_session_finalize(session_id: str = "", platform: str = "", **_: Any) -> 
         _children.pop(session_id, None)
         _pending_end.pop(session_id, None)
     _worker.submit(lambda: _titles.restore(target))
+    _apply_pending_label(target)  # a /resume in this pane: label the resumed session's window
     # The Rex session label is shared: put it back only when the last Hermes chat in it ends.
     if setting("session_naming") and not _registry.has_rex_session(target.session):
         _worker.submit(lambda: _titles.restore_session_label(target))

@@ -238,7 +238,8 @@ def _on_session_start(session_id: str = "", platform: str = "", **_: Any) -> Non
     target = _target_for(platform=platform)
     if target is not None:
         _remember(target, session_id)
-        _apply_pending_label(target)  # /resume with no finalize of a previous session
+        with _pending_lock:
+            _apply_pending_label(target)  # /resume with no finalize of a previous session
 
 
 def _pre_llm_call(session_id: str = "", platform: str = "", parent_session_id: str = "", **_: Any) -> None:
@@ -308,30 +309,33 @@ def _pre_command(command: str = "", args_raw: str = "", session_key: str = "", p
     """/title and /resume relabel the window. Hermes' CLI/TUI passes the session id as session_key."""
     if command not in ("title", "resume") or not (args_raw or "").strip():
         return
-    target = _target_for(session_id=session_key, session_key=session_key, platform=platform)
-    # A client-run /resume (classic CLI, Ink) is reported after it already ended the old session.
-    already_ended = target is None and str(platform or "") in LOCAL_PLATFORMS and command == "resume"
-    if already_ended:
-        target = _registry.recently_ended(session_key)
-    if target is None:
-        return
     ref = args_raw.strip()
     if command == "title":
-        _worker.submit(lambda: _titles.set_base(target, slug(ref, max_words=6)))
+        target = _target_for(session_id=session_key, session_key=session_key, platform=platform)
+        if target is not None:
+            _worker.submit(lambda: _titles.set_base(target, slug(ref, max_words=6)))
         return
-    sid, title = _resolve_session(ref)
-    if sid:
-        # Its finalize must find this pane even if the user quits before its first turn.
-        _registry.remember(target, session_id=sid)
+    if str(platform or "") not in LOCAL_PLATFORMS:
+        return
+    sid, title = _resolve_session(ref)  # a DB read: done before the lock, never inside it
     label = slug(title, max_words=6)
-    if label and already_ended:
-        # The old session's finalize has already restored the window: label it now.
-        _worker.submit(lambda: _titles.set_base(target, label))
-    elif label:
-        # /resume finalizes the current session after this hook, and that restores the window's
-        # original label; the resumed session's label goes on after it (see _apply_pending_label).
-        with _pending_lock:
-            _pending_label[target.block] = (label, time.time())
+    # /resume ends the current session, and that session's finalize restores the window's original
+    # label. Whether finalize already ran depends on the client (Ink and classic CLI run /resume
+    # themselves and report it afterwards), so decide under the lock finalize also holds.
+    with _pending_lock:
+        target = _target_for(session_id=session_key, session_key=session_key, platform=platform)
+        already_ended = target is None
+        if already_ended:
+            target = _registry.recently_ended(session_key)
+        if target is None:
+            return
+        if sid:
+            # Its finalize must find this pane even if the user quits before its first turn.
+            _registry.remember(target, session_id=sid)
+        if label and already_ended:
+            _worker.submit(lambda: _titles.set_base(target, label))  # after finalize's restore
+        elif label:
+            _pending_label[target.block] = (label, time.time())  # finalize applies it
 
 
 _pending_label: dict[str, tuple[str, float]] = {}  # rex block -> (label for the resumed session, at)
@@ -340,8 +344,8 @@ _PENDING_LABEL_MAX_AGE_S = 120
 
 
 def _apply_pending_label(target: Target) -> None:
-    with _pending_lock:
-        label, at = _pending_label.pop(target.block, ("", 0.0))
+    """Caller holds ``_pending_lock``."""
+    label, at = _pending_label.pop(target.block, ("", 0.0))
     if label and time.time() - at <= _PENDING_LABEL_MAX_AGE_S:
         _worker.submit(lambda: _titles.set_base(target, label))
 
@@ -350,12 +354,13 @@ def _on_session_finalize(session_id: str = "", platform: str = "", **_: Any) -> 
     target = _target_for(session_id=session_id, platform=platform)
     if target is None:
         return
-    _registry.forget(session_id)
     with _children_lock:
         _children.pop(session_id, None)
         _pending_end.pop(session_id, None)
-    _worker.submit(lambda: _titles.restore(target))
-    _apply_pending_label(target)  # a /resume in this pane: label the resumed session's window
+    with _pending_lock:  # one decision with a concurrent /resume (see _pre_command)
+        _registry.forget(session_id)
+        _worker.submit(lambda: _titles.restore(target))
+        _apply_pending_label(target)  # a /resume in this pane: label the resumed session's window
     # The Rex session label is shared: put it back only when the last Hermes chat in it ends.
     if setting("session_naming") and not _registry.has_rex_session(target.session):
         _worker.submit(lambda: _titles.restore_session_label(target))

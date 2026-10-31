@@ -392,6 +392,23 @@ def test_resume_reported_after_old_session_ended(plugin, fake_rex, monkeypatch):
     assert fake_rex.label() == "fix-login"
 
 
+def test_resume_when_old_session_ends_during_the_title_lookup(plugin, fake_rex, monkeypatch):
+    """The race seen live: finalize lands while pre_command reads the session DB."""
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+
+    def slow_lookup(ref):
+        plugin._on_session_finalize(session_id="s1", platform="cli")  # the client ended s1 meanwhile
+        return "old-sid", "Count .py files and read README first line #2"
+
+    monkeypatch.setattr(plugin, "_resolve_session", slow_lookup)
+    plugin._pre_command(command="resume", args_raw="old-sid", session_key="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "count-py-files-and-read-readme"
+
+
 def test_title_after_session_ended_does_nothing(plugin, fake_rex, monkeypatch):
     plugin._pre_llm_call(session_id="s1", platform="cli")
     drain(plugin)

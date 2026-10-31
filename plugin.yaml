@@ -1,5 +1,5 @@
 name: rex
-version: 1.2.2
+version: 1.2.3
 description: "Rex terminal multiplexer integration: tells Hermes which Rex pane it runs in, shows each session's status in its window title, alerts you when Hermes is waiting, and opens panes that follow subagents and kanban workers."
 author: kshitijk4poor
 provides_hooks:

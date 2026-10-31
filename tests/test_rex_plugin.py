@@ -372,6 +372,37 @@ def test_resume_labels_window_after_old_session_restores(plugin, fake_rex, monke
     assert fake_rex.label() == "fix-login"
 
 
+def test_resume_reported_after_old_session_ended(plugin, fake_rex, monkeypatch):
+    """Classic CLI / Ink run /resume themselves and report it after the old session ended."""
+    monkeypatch.setattr(plugin, "_resolve_session",
+                        lambda ref: ("old-sid", "Count .py files and read README first line #2"))
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
+    plugin._pre_command(command="resume", args_raw="old-sid", session_key="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "count-py-files-and-read-readme"
+    plugin._on_session_finalize(session_id="old-sid", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
+
+
+def test_title_after_session_ended_does_nothing(plugin, fake_rex, monkeypatch):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    plugin._pre_command(command="title", args_raw="late", session_key="s1", platform="cli")
+    drain(plugin)
+    assert fake_rex.label() == "fix-login"
+
+
 def test_messaging_platform_hooks_are_ignored(plugin, fake_rex):
     plugin._pre_llm_call(session_id="s1", platform="telegram")
     drain(plugin)

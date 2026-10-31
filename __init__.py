@@ -309,6 +309,10 @@ def _pre_command(command: str = "", args_raw: str = "", session_key: str = "", p
     if command not in ("title", "resume") or not (args_raw or "").strip():
         return
     target = _target_for(session_id=session_key, session_key=session_key, platform=platform)
+    # A client-run /resume (classic CLI, Ink) is reported after it already ended the old session.
+    already_ended = target is None and str(platform or "") in LOCAL_PLATFORMS and command == "resume"
+    if already_ended:
+        target = _registry.recently_ended(session_key)
     if target is None:
         return
     ref = args_raw.strip()
@@ -320,7 +324,10 @@ def _pre_command(command: str = "", args_raw: str = "", session_key: str = "", p
         # Its finalize must find this pane even if the user quits before its first turn.
         _registry.remember(target, session_id=sid)
     label = slug(title, max_words=6)
-    if label:
+    if label and already_ended:
+        # The old session's finalize has already restored the window: label it now.
+        _worker.submit(lambda: _titles.set_base(target, label))
+    elif label:
         # /resume finalizes the current session after this hook, and that restores the window's
         # original label; the resumed session's label goes on after it (see _apply_pending_label).
         with _pending_lock:

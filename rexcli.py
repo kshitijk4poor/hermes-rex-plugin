@@ -15,6 +15,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -163,6 +164,7 @@ class Registry:
     by_session_id: dict[str, Target] = field(default_factory=dict)
     by_session_key: dict[str, Target] = field(default_factory=dict)
     child_sessions: set[str] = field(default_factory=set)
+    ended: dict[str, tuple[Target, float]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def remember(self, target: Target, *, session_id: str = "", session_key: str = "") -> None:
@@ -179,7 +181,19 @@ class Registry:
 
     def forget(self, session_id: str) -> None:
         with self._lock:
-            self.by_session_id.pop(session_id, None)
+            target = self.by_session_id.pop(session_id, None)
+            now = time.time()
+            for sid in [s for s, (_, at) in self.ended.items() if now - at > 300]:
+                del self.ended[sid]  # only a short window matters; keep the map small
+            if target is not None:
+                self.ended[session_id] = (target, now)
+
+    def recently_ended(self, session_id: str, max_age: float = 60.0) -> Optional[Target]:
+        """The pane of a session finalized within *max_age* seconds (a client-run /resume reports
+        the command after it has already ended the old session)."""
+        with self._lock:
+            target, at = self.ended.get(session_id or "", (None, 0.0))
+            return target if target is not None and time.time() - at <= max_age else None
 
     def has_rex_session(self, rex_session: str) -> bool:
         """True while any remembered Hermes session still lives in Rex session *rex_session*."""

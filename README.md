@@ -93,6 +93,20 @@ uv run --no-project --with pytest python -m pytest -c tests/pytest.ini tests
 
 The tests drive the hooks against a fake `rex`; no Hermes install is needed.
 
+## What it runs
+
+- The `rex` CLI, with `--autostart=false` so it never starts a Rex server,
+  and a 3-second timeout per call. It talks only to your local Rex server.
+- `lsappinfo` and `osascript` (macOS only) for "is Rex in front?" and the
+  alert notification.
+- `follow.py` (stdlib only), inside each subagent or kanban pane, which reads
+  the Hermes transcript or worker log it follows. Panes close after
+  `pane_linger_seconds`.
+
+No network calls, no credentials, no telemetry. It writes only its own state
+(`last_target`, plus `trace.jsonl` when `debug` is on) in its plugin data dir.
+Requires Hermes 0.22.3 or newer (`terminal.client_env_passthrough`).
+
 ## Notes
 
 - The session ID is captured when a session starts. A resumed session keeps the
@@ -102,8 +116,16 @@ The tests drive the hooks against a fake `rex`; no Hermes install is needed.
 - Kanban workers are started by the gateway's dispatcher, which has no pane of
   its own, so their panes go to the Rex session of the most recent Hermes turn
   (within 12 hours).
-- `rex skill status` won't list Hermes. Native support belongs in
-  `rex skill setup`.
+- `rex skill status` won't list Hermes, and `rex skill setup` / `remove`
+  don't touch it: install, update and remove the plugin with
+  `hermes plugins`. Rex's session-naming choice from `rex skill setup` doesn't
+  apply either; Hermes uses the `session_naming` setting above.
+- The `rex:rex` skill reads Rex's guide with naming off, so it never
+  contradicts the session context (which can tell Hermes to name only its
+  window, or nothing).
+- Rex prints "the Rex setup for this agent is out of date" when its naming
+  flag differs from the choice `rex skill setup` recorded for other agents.
+  That notice can't apply to Hermes, so the plugin drops it.
 
 ## License
 

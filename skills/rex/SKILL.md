@@ -3,13 +3,18 @@ name: rex
 description: Use the rex CLI to manage Rex sessions, open tabs, arrange panes, run commands, inspect terminal output, and control connected Rex apps.
 ---
 
-Run `rex __internal skill` and follow the guide it prints. The guide comes from
-the installed Rex CLI, so it describes the commands available in that version.
+Run `rex __internal skill --feature-session-naming=false` and follow the guide it
+prints. The guide comes from the installed Rex CLI, so it describes the commands
+available in that version.
 
 If the command fails, the installed Rex version predates the guide. Start with
 `rex whoami --json`, then use `rex --help` and `rex COMMAND --help`.
 
 Hermes notes:
+- Naming: your Rex startup context says whether to name the session, only your
+  window, or neither (it follows this plugin's `session_naming` setting and
+  whether other windows share the Rex session). Follow it over the guide. With
+  no startup context, rename only when the user asks.
 - `REX_SESSION` / `REX_BLOCK` are inherited by your terminal tool when Hermes was
   launched inside a Rex pane. If they are unset, Hermes is not running in Rex;
   use `rex whoami --json` and `rex ls --json` to find a target.

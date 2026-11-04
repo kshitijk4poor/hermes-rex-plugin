@@ -36,13 +36,16 @@ FAKE_REX = textwrap.dedent(r'''
         return next(w for w in st["windows"] if block in w["blocks"])
     cmd = args[:2]
     if args[:2] == ["__internal", "session-start"]:
-        # Like the real Rex: naming on adds the session-naming paragraph; an explicit false
-        # adds a bogus "setup is out of date" paragraph instead.
+        # Like the real Rex: naming on adds the session-naming paragraph, and a flag that differs
+        # from the choice `rex skill setup` recorded for the agent ($FAKE_REX_SETUP_NAMING: "true"
+        # by default, "" when setup never ran) adds a "setup is out of date" paragraph.
+        naming = "false" if "--feature-session-naming=false" in args else "true"
         print("REX CONTEXT")
-        if "--feature-session-naming=false" in args:
-            print("\nThe Rex setup for this agent is out of date. Suggest running `rex skill setup`")
-        else:
+        if naming == "true":
             print('\nName the session NAMING. Run `rex session rename "$REX_SESSION" <label>`.')
+        recorded = os.environ.get("FAKE_REX_SETUP_NAMING", "true")
+        if recorded and recorded != naming:
+            print("\nThe Rex setup for this agent is out of date. Suggest running `rex skill setup`\nto update it.")
     elif cmd == ["window", "inspect"]:
         w = window_of(os.environ["REX_BLOCK"])
         print(json.dumps({"window_id": w["id"], "label": w["label"], "focused_block_id": w["blocks"][0]}))
@@ -189,6 +192,17 @@ def test_prompt_section_naming_off_drops_session_and_window_naming(plugin, fake_
     assert "rex window rename" not in text and "rex run" not in text
     starts = [c["args"] for c in fake_rex.calls() if c["args"][:2] == ["__internal", "session-start"]]
     assert starts and all("--feature-session-naming=false" not in a for a in starts)
+
+
+def test_prompt_section_drops_stale_setup_notice_from_other_agents_setup(plugin, monkeypatch):
+    # `rex skill setup` without --session-naming records naming off for every agent; Rex then
+    # tells a hook asking for naming that "setup is out of date", which Hermes can't act on.
+    monkeypatch.setenv("FAKE_REX_SETUP_NAMING", "false")
+    for naming in (True, False):
+        plugin.ctx_for_test.settings["session_naming"] = naming
+        text = plugin._prompt_section({"platform": "cli"})
+        assert text.startswith("REX CONTEXT") and "out of date" not in text and "rex skill setup" not in text
+        assert ("rex session rename" in text) is naming
 
 
 def test_prompt_section_skips_messaging_platforms_and_non_rex(plugin, monkeypatch):

@@ -92,16 +92,18 @@ def setting(key: str) -> Any:
 def _session_start_text(target: Target, *, naming: bool) -> str:
     """Rex's own SessionStart context, or '' on any failure.
 
-    Always fetched with naming on: Rex answers ``--feature-session-naming=false`` with a bogus
-    "setup is out of date, run rex skill setup" paragraph. When session naming isn't wanted, Rex's
-    naming paragraph is dropped here instead.
+    Always fetched with naming on, and Rex's naming paragraph is dropped here when it isn't wanted.
+    Rex appends "the Rex setup for this agent is out of date, run rex skill setup" whenever the flag
+    differs from the choice ``rex skill setup`` recorded for that agent; that is about another
+    agent's install and can't set up Hermes, so it is always dropped.
     """
     rc, out = rexcli.run(target, "__internal", "session-start", "--agent", "opencode",
                          "--feature-session-naming=true")
     text = out.strip() if rc == 0 else ""
-    if text and not naming:
-        text = "\n\n".join(p for p in text.split("\n\n") if "rex session rename" not in p)
-    return text
+    paragraphs = [p for p in text.split("\n\n") if p and "rex skill setup" not in p]
+    if not naming:
+        paragraphs = [p for p in paragraphs if "rex session rename" not in p]
+    return "\n\n".join(paragraphs)
 
 
 def _shares_rex_session(target: Target) -> bool:

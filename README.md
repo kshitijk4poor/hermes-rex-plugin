@@ -16,6 +16,15 @@ For Hermes sessions started (CLI or TUI) inside a Rex pane:
   rendered once per session and frozen, so prompt caching is unaffected.
 - **Skill.** `rex:rex`, a stub that defers to `rex __internal skill`, so the
   guide always matches your installed Rex.
+- **Program status.** Hermes reports its state to Rex with the
+  [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status)
+  (OSC 7501): working (with the running tool), blocked (approval, question or
+  sudo, with the reason), done (the reply's first line) and error. Rex shows
+  it as a spinner on unfocused tabs and a mark in the session picker, and
+  sends its own Done notification. Each running subagent gets its own record,
+  titled with its goal, under the session's: its current tool, or what it is
+  waiting for. A turn whose background subagents are still running reports
+  "waiting for N subagents" instead of done.
 - **Status in the window title.** `● fix-login` while Hermes works,
   `? fix-login` while it waits for you, then `✓` done, `■` stopped or
   `✗` failed. Only the mark belongs to the plugin; the label stays whatever
@@ -46,14 +55,15 @@ nothing happens, never an error.
 
 ```sh
 hermes plugins install kshitijk4poor/hermes-rex-plugin --enable
-hermes config set terminal.client_env_passthrough '["REX_SESSION","REX_BLOCK","REX_SERVER","REX_BIN_DIR"]'
+hermes rex doctor --fix
 ```
 
-The second line is required. Hermes runs every session in one gateway process,
+The second line is required: it adds `REX_SESSION`, `REX_BLOCK`, `REX_SERVER`
+and `REX_BIN_DIR` to `terminal.client_env_passthrough`, keeping any entries
+already there. Hermes runs every session in one gateway process,
 not in your shell, so the shell's `REX_*` variables only reach a session (and
 its terminal-tool commands) when they're on the client-env allowlist. The plugin
-logs a warning at load if they're missing. If you already have entries in
-`client_env_passthrough`, add these four to your list instead of replacing it.
+logs a warning at load if they're missing.
 
 Sessions that already exist keep the system prompt they started with; start a
 new one to get the session context.
@@ -65,6 +75,7 @@ All optional, under `plugins.entries.rex.settings` in `config.yaml`:
 | Setting | Default | |
 |---|---|---|
 | `session_naming` | `true` | Rex's "name the session after the task", plus the same label on the window |
+| `program_status` | `true` | OSC 7501 status reports to the pane |
 | `status_titles` | `true` | ● ? ✓ ■ ✗ mark on the window label |
 | `alerts` | `unfocused` | `unfocused`, `always` or `off` |
 | `visible_commands` | `true` | Tell the agent to run long-lived commands in Rex panes |
@@ -78,6 +89,13 @@ For example: `hermes config set plugins.entries.rex.settings.alerts always`.
 ## Check it
 
 From a Rex pane:
+
+```sh
+hermes rex doctor
+```
+
+It checks that you're in a Rex pane, that `rex` and the Rex server answer, and
+that the passthrough setting is in place. Then:
 
 ```sh
 hermes chat -q 'Without tools: quote REX_SESSION from your context. Then run: echo $REX_SESSION'
@@ -95,6 +113,8 @@ The tests drive the hooks against a fake `rex`; no Hermes install is needed.
 
 ## What it runs
 
+- Status reports are written straight to the pane's tty, found once per pane
+  with `rex block call process` and `ps -o tty=`. Nothing goes to stdout.
 - The `rex` CLI, with `--autostart=false` so it never starts a Rex server,
   and a 3-second timeout per call. It talks only to your local Rex server.
 - `lsappinfo` and `osascript` (macOS only) for "is Rex in front?" and the
@@ -105,7 +125,8 @@ The tests drive the hooks against a fake `rex`; no Hermes install is needed.
 
 No network calls, no credentials, no telemetry. It writes only its own state
 (`last_target`, plus `trace.jsonl` when `debug` is on) in its plugin data dir.
-Requires Hermes 0.22.3 or newer (`terminal.client_env_passthrough`).
+`hermes rex doctor --fix` writes `terminal.client_env_passthrough` through
+Hermes's config writer. Requires Hermes 0.22.3 or newer (`terminal.client_env_passthrough`).
 
 ## Notes
 

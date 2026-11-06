@@ -1,17 +1,40 @@
 name: rex
-version: "1.3.0"
+version: "1.4.0"
+manifest_version: 2
+kind: standalone
 requires_hermes: ">=0.22.3"
-description: "Rex terminal multiplexer integration: tells Hermes which Rex pane it runs in, shows each session's status in its window title, alerts you when Hermes is waiting, and opens panes that follow subagents and kanban workers."
+description: "Rex terminal multiplexer integration: tells Hermes which Rex pane it runs in, reports each session's status to Rex (tab spinner, blocked and done marks), marks the window title, alerts you when Hermes is waiting, and opens panes that follow subagents and kanban workers."
 author: kshitijk4poor
+license: MIT
+homepage: https://github.com/kshitijk4poor/hermes-rex-plugin
+platforms:
+  - macos
+  - linux
+tags:
+  - rex
+  - terminal
+  - status
 provides_hooks:
   - on_session_start
   - pre_llm_call
+  - post_llm_call
   - on_session_end
   - on_human_input_request
   - on_human_input_resolved
+  - pre_tool_call
   - post_tool_call
   - pre_command
   - on_session_finalize
   - subagent_start
   - subagent_stop
   - on_kanban_worker_spawned
+config_schema:
+  session_naming: {type: bool, default: true, label: "Session naming", description: "Let the model name the Rex session and its window after the task"}
+  program_status: {type: bool, default: true, label: "Program status", description: "Report working, blocked, done and error to Rex (OSC 7501): tab spinner, session picker marks, Rex's Done notification"}
+  status_titles: {type: bool, default: true, label: "Status titles", description: "Prefix the window label with a status mark"}
+  alerts: {type: str, default: unfocused, choices: [unfocused, always, "off"], label: "Alerts", description: "macOS notification when Hermes waits for you"}
+  visible_commands: {type: bool, default: true, label: "Visible commands", description: "Tell the agent to run long-lived commands in Rex panes"}
+  subagent_panes: {type: bool, default: true, label: "Subagent panes", description: "A pane per subagent following its transcript"}
+  kanban_panes: {type: bool, default: true, label: "Kanban panes", description: "A pane per kanban worker following its log"}
+  pane_linger_seconds: {type: int, default: 300, label: "Pane linger (s)", description: "How long a finished follower pane stays open"}
+  debug: {type: bool, default: false, label: "Debug trace", description: "Log every hook call (ids only) to trace.jsonl in the plugin data dir"}

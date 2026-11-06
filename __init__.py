@@ -7,6 +7,9 @@ inside Hermes can do:
   (``rex __internal session-start``), rendered once per session and frozen (prompt-cache safe).
   Only for sessions whose CLI/TUI client was launched inside a Rex pane.
 * **Skill** — ``rex:rex``, a stub that defers to ``rex __internal skill``.
+* **Program status** — OSC 7501 reports to the pane (working + current tool, blocked with why,
+  done with the reply's first line, error), which Rex shows in its tab bar and session picker and
+  uses for its Done notification. Each running subagent gets its own child record.
 * **Status titles** — the session's window label gets a status mark: ● busy, ? waiting for you,
   ✓ done, ■ stopped, ✗ failed.
 * **Alerts** — a macOS notification when Hermes waits for approval / a clarify answer / sudo
@@ -34,9 +37,10 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from . import rexcli
+from . import doctor, rexcli
 from .panes import KanbanPanes, SubagentPanes, live_root
 from .rexcli import LOCAL_PLATFORMS, REX_VARS, Registry, Target, Worker, current_target
+from .status import BLOCKED_KIND, Reporter, one_line, record_id
 from .titles import Titles, alert, slug
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,7 @@ _SKILL_PATH = Path(__file__).parent / "skills" / "rex" / "SKILL.md"
 
 DEFAULTS: dict[str, Any] = {
     "session_naming": True,      # Rex's "name the session after the task" (+ the window, same label)
+    "program_status": True,      # OSC 7501 reports: Rex's tab spinner, blocked/done marks, Done alert
     "status_titles": True,       # ● ? ✓ ■ ✗ prefix on the session's window label
     "alerts": "unfocused",       # unfocused | always | off
     "visible_commands": True,    # tell the agent to run servers/watchers/long jobs in Rex panes
@@ -58,6 +63,9 @@ _LAST_TARGET_MAX_AGE_S = 12 * 3600
 # A child whose subagent_stop never arrives stops holding its parent's ● after this long.
 _CHILD_MAX_AGE_S = 2 * 3600
 _STATUS_FOR_END = (("completed", "done"), ("interrupted", "stopped"), ("failed", "failed"))
+# Window-mark states -> Program Status states. An interrupt is ``idle`` in the protocol.
+_PROGRAM_STATE = {"busy": "working", "waiting": "blocked", "done": "done", "stopped": "idle",
+                  "failed": "error"}
 
 _ctx: Any = None
 _worker = Worker()
@@ -65,6 +73,8 @@ _registry = Registry()
 _titles = Titles()
 _subagents = SubagentPanes()
 _kanban = KanbanPanes()
+_reporter = Reporter()
+_last_reply: dict[str, str] = {}  # session id -> first line of the turn's reply, for its done report
 _last_saved: dict[str, Any] = {"key": None, "at": 0.0}
 _last_saved_lock = threading.Lock()
 
@@ -197,9 +207,42 @@ def _target_for(*, session_id: str = "", session_key: str = "", platform: Any = 
     return current_target() or _registry.lookup(session_id=session_id, session_key=session_key)
 
 
-def _status(target: Optional[Target], state: Optional[str]) -> None:
-    if target is not None and setting("status_titles"):
+def _status(target: Optional[Target], state: Optional[str], *, msg: object = "", kind: str = "",
+            title: bool = True) -> None:
+    """Show *state* as the window mark (unless *title* is False) and as the pane's root record."""
+    if target is None:
+        return
+    if title and setting("status_titles"):
         _worker.submit(lambda: _titles.set_status(target, state))
+    program_state = _PROGRAM_STATE.get(state or "")
+    if program_state:
+        _report(target, program_state, msg=msg, kind=kind)
+
+
+def _report(target: Optional[Target], state: str, *, rid: str = "", **fields: object) -> None:
+    """One OSC 7501 report on the worker thread (keeps reports in order with window renames)."""
+    if target is not None and setting("program_status"):
+        _worker.submit(lambda: _reporter.send(target, state, rid=rid, **fields))
+
+
+def _child_record(child_session_id: str) -> str:
+    return record_id("sub", child_session_id)
+
+
+def _report_child(child_session_id: str, state: str, target: Optional[Target] = None, **fields: object) -> None:
+    """A report on a subagent's own record. Every report repeats its title: Rex replaces a record
+    whole, so a report without one would drop it."""
+    _report(target or _child_target(child_session_id), state, rid=_child_record(child_session_id),
+            title=_child_title.get(child_session_id, "subagent"), **fields)
+
+
+def _child_target(child_session_id: str) -> Optional[Target]:
+    """The pane of a subagent's parent (a child's hooks run in its parent's client env)."""
+    return current_target() or _registry.lookup(session_id=_child_parent.get(child_session_id, ""))
+
+
+_child_parent: dict[str, str] = {}  # child session id -> parent session id
+_child_title: dict[str, str] = {}   # child session id -> its goal's first line (the record's title)
 
 
 # --- subagents still running after their parent's turn ended ------------------------------------
@@ -249,13 +292,15 @@ def _on_session_start(session_id: str = "", platform: str = "", **_: Any) -> Non
 def _pre_llm_call(session_id: str = "", platform: str = "", parent_session_id: str = "", **_: Any) -> None:
     if parent_session_id:  # a subagent's turn runs in its parent's client env; not our pane
         _registry.child_sessions.add(session_id)
+        _child_parent.setdefault(session_id, parent_session_id)
+        _report_child(session_id, "working", msg="thinking")
         return None
     target = _target_for(platform=platform)
     if target is not None:
         with _children_lock:
             _pending_end.pop(session_id, None)  # a new turn supersedes a held end state
         _remember(target, session_id)
-        _status(target, "busy")
+        _status(target, "busy", msg="thinking")
     return None  # a pre_llm_call return value is injected into the turn; we add nothing
 
 
@@ -264,11 +309,47 @@ def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None
     if session_id in _registry.child_sessions:
         return
     state = next((s for flag, s in _STATUS_FOR_END if kw.get(flag)), "done")
-    if state == "done" and _running_children(session_id):
+    target = _target_for(session_id=session_id, platform=platform)
+    running = state == "done" and _running_children(session_id)
+    if running:
         with _children_lock:
             _pending_end[session_id] = state  # stays ● until the last subagent stops
+        word = "subagent" if running == 1 else "subagents"
+        _report(target, "working", msg=f"waiting for {running} {word}")
         return
-    _status(_target_for(session_id=session_id, platform=platform), state)
+    _status(target, state, msg=_end_message(session_id, state, kw.get("turn_exit_reason")))
+
+
+def _end_message(session_id: str, state: str, reason: object = "") -> str:
+    reply = _last_reply.pop(session_id, "")
+    if state == "done":
+        return reply or "finished"
+    if state == "failed":
+        return one_line(reason) or "turn failed"
+    return ""
+
+
+def _post_llm_call(session_id: str = "", assistant_response: object = "", **_: Any) -> None:
+    """Keep the reply's first line for the turn's done report."""
+    if session_id and session_id not in _registry.child_sessions:
+        line = one_line(assistant_response)
+        if line:
+            _last_reply[session_id] = line
+        else:
+            _last_reply.pop(session_id, None)
+
+
+def _pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> None:
+    """Name the running tool in the pane's record (a subagent's in its own child record)."""
+    if not tool_name or not setting("program_status"):
+        return None
+    if session_id in _registry.child_sessions:
+        _report_child(session_id, "working", msg=tool_name)
+    else:
+        target = current_target()
+        if target is not None:
+            _report(target, "working", msg=tool_name)
+    return None  # never a directive: this hook only observes
 
 
 def _on_human_input_request(kind: str = "", session_id: str = "", session_key: str = "",
@@ -276,7 +357,11 @@ def _on_human_input_request(kind: str = "", session_id: str = "", session_key: s
     target = _target_for(session_id=session_id, session_key=session_key, platform=platform)
     if target is None:
         return
-    _status(target, "waiting")
+    blocked_kind = BLOCKED_KIND.get(kind, "question")
+    reason = prompt or {"approval": "approve a command", "sudo": "sudo password"}.get(kind, "input needed")
+    if session_id in _registry.child_sessions:  # a subagent's approval: block its record, not ours
+        _report_child(session_id, "blocked", target, kind=blocked_kind, msg=reason)
+    _status(target, "waiting", kind=blocked_kind, msg=reason)
     mode = setting("alerts")
     if mode != "off":
         _worker.submit(lambda: alert(target, mode, kind, prompt))
@@ -284,16 +369,22 @@ def _on_human_input_request(kind: str = "", session_id: str = "", session_key: s
 
 def _on_human_input_resolved(session_id: str = "", session_key: str = "", platform: str = "",
                              **_: Any) -> None:
-    _status(_target_for(session_id=session_id, session_key=session_key, platform=platform), "busy")
+    target = _target_for(session_id=session_id, session_key=session_key, platform=platform)
+    if target is not None and session_id in _registry.child_sessions:
+        _report_child(session_id, "working", target, msg="thinking")
+    _status(target, "busy", msg="thinking")
 
 
 def _post_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", **_: Any) -> None:
-    """The model renaming its window drops the status mark; put it back."""
-    if tool_name != "terminal" or not isinstance(args, dict):
+    """Back to "thinking" once a tool returns; and a model renaming its window drops the status
+    mark, so put it back."""
+    child = session_id in _registry.child_sessions
+    if child:
+        _report_child(session_id, "working", msg="thinking")
         return
-    command = str(args.get("command") or "")
-    if "rex" in command and "rename" in command and session_id not in _registry.child_sessions:
-        _status(_target_for(session_id=session_id), "busy")
+    command = str(args.get("command") or "") if isinstance(args, dict) else ""
+    renamed = tool_name == "terminal" and "rex" in command and "rename" in command
+    _status(current_target() or _target_for(session_id=session_id), "busy", msg="thinking", title=renamed)
 
 
 def _resolve_session(ref: str) -> tuple[str, str]:
@@ -374,6 +465,8 @@ def _session_left(session_id: str, target: Target) -> None:
     with _children_lock:
         _children.pop(session_id, None)
         _pending_end.pop(session_id, None)
+    _last_reply.pop(session_id, None)
+    _report(target, "clear", rid="sub")  # any subagent records still shown in this pane
     with _pending_lock:  # one decision with a concurrent /resume (see _pre_command)
         _registry.forget(session_id)
         _worker.submit(lambda: _titles.restore(target))
@@ -385,14 +478,15 @@ def _session_left(session_id: str, target: Target) -> None:
 
 def _subagent_start(parent_session_id: str = "", child_session_id: str = "", child_goal: str = "",
                     **_: Any) -> None:
+    target = current_target() or _registry.lookup(session_id=parent_session_id or "")
     if child_session_id:
         _registry.child_sessions.add(child_session_id)
         if parent_session_id:
             _child_started(parent_session_id, child_session_id)
-    if not setting("subagent_panes"):
-        return
-    target = current_target() or _registry.lookup(session_id=parent_session_id or "")
-    if target is None:
+            _child_parent[child_session_id] = parent_session_id
+        _child_title[child_session_id] = one_line(child_goal, 64) or "subagent"
+        _report_child(child_session_id, "working", target, msg="starting")
+    if not setting("subagent_panes") or target is None:
         return
     root = live_root()  # profile-scoped: resolve here, on the hook's thread
     linger = setting("pane_linger_seconds")
@@ -402,9 +496,13 @@ def _subagent_start(parent_session_id: str = "", child_session_id: str = "", chi
 def _subagent_stop(parent_session_id: str = "", child_session_id: str = "", **_: Any) -> None:
     if not parent_session_id or not child_session_id:
         return
+    target = current_target() or _registry.lookup(session_id=parent_session_id)
+    _child_parent.pop(child_session_id, None)
+    _child_title.pop(child_session_id, None)
+    _report(target, "clear", rid=_child_record(child_session_id))  # its result lands in the parent
     state = _child_stopped(parent_session_id, child_session_id)
     if state:
-        _status(current_target() or _registry.lookup(session_id=parent_session_id), state)
+        _status(target, state, msg=_end_message(parent_session_id, state))
 
 
 def _on_kanban_worker_spawned(task_id: str = "", board: Optional[str] = None, assignee: str = "",
@@ -425,7 +523,9 @@ HOOKS = {
     "on_session_end": _on_session_end,
     "on_human_input_request": _on_human_input_request,
     "on_human_input_resolved": _on_human_input_resolved,
+    "pre_tool_call": _pre_tool_call,
     "post_tool_call": _post_tool_call,
+    "post_llm_call": _post_llm_call,
     "pre_command": _pre_command,
     "on_session_finalize": _on_session_finalize,
     "subagent_start": _subagent_start,
@@ -451,8 +551,7 @@ def _warn_if_passthrough_missing() -> None:
     if missing:
         logger.warning(
             "rex plugin: terminal.client_env_passthrough is missing %s — Hermes sessions won't see "
-            "which Rex pane they run in. Run: hermes config set terminal.client_env_passthrough "
-            "'[\"REX_SESSION\",\"REX_BLOCK\",\"REX_SERVER\",\"REX_BIN_DIR\"]'", ", ".join(missing))
+            "which Rex pane they run in. Run: hermes rex doctor --fix", ", ".join(missing))
 
 
 _TRACE_FIELDS = ("session_id", "session_key", "parent_session_id", "child_session_id", "platform",
@@ -498,3 +597,5 @@ def register(ctx) -> None:
         ctx.register_skill("rex", _SKILL_PATH, description=(
             "Use the rex CLI to manage Rex sessions, open tabs, arrange panes, run commands, "
             "inspect terminal output, and control connected Rex apps."))
+    ctx.register_cli_command("rex", "Rex terminal integration (doctor)", doctor.setup, doctor.run,
+                             description="Check that Hermes can see and report to the Rex pane it runs in.")

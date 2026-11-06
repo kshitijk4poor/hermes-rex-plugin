@@ -46,6 +46,8 @@ FAKE_REX = textwrap.dedent(r'''
         recorded = os.environ.get("FAKE_REX_SETUP_NAMING", "true")
         if recorded and recorded != naming:
             print("\nThe Rex setup for this agent is out of date. Suggest running `rex skill setup`\nto update it.")
+    elif cmd == ["block", "call"] and args[-1] == "process":
+        print(json.dumps({"child": {"pid": 1}, "foreground": {"pid": 2}}))
     elif cmd == ["window", "inspect"]:
         w = window_of(os.environ["REX_BLOCK"])
         print(json.dumps({"window_id": w["id"], "label": w["label"], "focused_block_id": w["blocks"][0]}))
@@ -148,15 +150,27 @@ class FakeCtx:
     def register_skill(self, *a, **k):
         pass
 
+    def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+        self.cli = {"name": name, "setup": setup_fn, "handler": handler_fn}
+
 
 @pytest.fixture
-def plugin(fake_rex):
+def pane_tty(tmp_path):
+    """A regular file standing in for the pane's tty; reports are read back from it."""
+    path = tmp_path / "tty"
+    path.touch()
+    return path
+
+
+@pytest.fixture
+def plugin(fake_rex, pane_tty, monkeypatch):
     name = f"rexplugin_{time.time_ns()}"
     spec = importlib.util.spec_from_file_location(name, ROOT / "__init__.py",
                                                   submodule_search_locations=[str(ROOT)])
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
+    monkeypatch.setattr(sys.modules[name + ".status"], "_tty_for_pid", lambda pid: str(pane_tty))
     ctx = FakeCtx()
     mod.register(ctx)
     mod.ctx_for_test = ctx
@@ -630,3 +644,174 @@ def test_follow_stops_when_pid_exits(tmp_path):
     out = subprocess.run([sys.executable, str(ROOT / "follow.py"), "--log", str(log), "--pid",
                           str(sleeper.pid), "--linger", "0"], capture_output=True, text=True, timeout=15)
     assert "worker start" in out.stdout and "── exited ──" in out.stdout
+
+
+# --- program status (OSC 7501) ----------------------------------------------------------------
+
+import base64 as _b64
+import re as _re
+
+_OSC_RE = _re.compile(r"\x1b\]7501;([^\x1b]*)\x1b\\")
+
+
+def reports(pane_tty):
+    """Each OSC 7501 report written to the pane, as a dict with msg/title decoded."""
+    out = []
+    for body in _OSC_RE.findall(pane_tty.read_bytes().decode("ascii")):
+        rec = dict(pair.split("=", 1) for pair in body.split(":"))
+        for key in ("msg", "title"):
+            if key in rec:
+                rec[key] = _b64.b64decode(rec[key]).decode("utf-8")
+        out.append(rec)
+    return out
+
+
+def test_turn_reports_working_tool_and_done_with_reply(plugin, pane_tty):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._pre_tool_call(tool_name="terminal", session_id="s1")
+    plugin._post_tool_call(tool_name="terminal", args={"command": "ls"}, session_id="s1")
+    plugin._post_llm_call(session_id="s1", assistant_response="\n  Fixed the redirect.\nMore detail")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    got = [(r["state"], r.get("msg")) for r in reports(pane_tty)]
+    assert got == [("working", "thinking"), ("working", "terminal"), ("working", "thinking"),
+                   ("done", "Fixed the redirect.")]
+    assert all(r["app"] == "hermes" and "id" not in r for r in reports(pane_tty))
+
+
+def test_blocked_kinds_and_resume(plugin, pane_tty):
+    for kind, want in (("approval", "permission"), ("clarify", "question"), ("sudo", "auth")):
+        plugin._on_human_input_request(kind=kind, session_id="s1", platform="cli", prompt="rm -rf build\nx")
+        plugin._on_human_input_resolved(session_id="s1", platform="cli")
+    drain(plugin)
+    got = [(r["state"], r.get("kind"), r.get("msg")) for r in reports(pane_tty)]
+    assert got == [("blocked", "permission", "rm -rf build"), ("working", None, "thinking"),
+                   ("blocked", "question", "rm -rf build"), ("working", None, "thinking"),
+                   ("blocked", "auth", "rm -rf build"), ("working", None, "thinking")]
+
+
+def test_interrupt_reports_idle_and_failure_reports_error(plugin, pane_tty):
+    plugin._on_session_end(session_id="s1", platform="cli", interrupted=True)
+    plugin._on_session_end(session_id="s1", platform="cli", failed=True, turn_exit_reason="rate limited\nretry")
+    drain(plugin)
+    assert [(r["state"], r.get("msg")) for r in reports(pane_tty)] == [("idle", None), ("error", "rate limited")]
+
+
+def test_subagents_get_child_records(plugin, fake_rex, pane_tty):
+    plugin.ctx_for_test.settings["subagent_panes"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._subagent_start(parent_session_id="s1", child_session_id="20261106_child_abc", child_goal="audit\nthe tests")
+    plugin._pre_llm_call(session_id="20261106_child_abc", platform="cli", parent_session_id="s1")
+    plugin._pre_tool_call(tool_name="read_file", session_id="20261106_child_abc")
+    plugin._on_human_input_request(kind="approval", session_id="20261106_child_abc", platform="cli", prompt="git push")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)  # background child still runs
+    plugin._subagent_stop(parent_session_id="s1", child_session_id="20261106_child_abc")
+    drain(plugin)
+    rows = reports(pane_tty)
+    child = [r for r in rows if r.get("id")]
+    assert {r["id"] for r in child} == {"sub/20261106_child_abc"}
+    assert [(r["state"], r.get("msg")) for r in child] == [
+        ("working", "starting"), ("working", "thinking"), ("working", "read_file"), ("blocked", "git push"),
+        ("clear", None)]
+    assert {r.get("title") for r in child if r["state"] != "clear"} == {"audit"}  # on every report
+    assert child[3]["kind"] == "permission"
+    root = [(r["state"], r.get("msg")) for r in rows if not r.get("id")]
+    # the parent says what it is waiting on, then reports done once the last child stops
+    assert root[-2:] == [("working", "waiting for 1 subagent"), ("done", "finished")]
+    assert ("working", "read_file") not in root  # a child's tool never overwrites the parent's record
+
+
+def test_session_end_clears_subagent_records(plugin, pane_tty, monkeypatch):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    monkeypatch.delenv("REX_SESSION")
+    monkeypatch.delenv("REX_BLOCK")
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    drain(plugin)
+    assert reports(pane_tty)[-1] == {"state": "clear", "id": "sub"}
+
+
+def test_program_status_off_writes_nothing(plugin, pane_tty):
+    plugin.ctx_for_test.settings["program_status"] = False
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._pre_tool_call(tool_name="terminal", session_id="s1")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert pane_tty.read_bytes() == b""
+
+
+def test_messaging_platform_reports_nothing(plugin, pane_tty):
+    plugin._pre_llm_call(session_id="s1", platform="telegram")
+    plugin._on_session_end(session_id="s1", platform="telegram", completed=True)
+    drain(plugin)
+    assert pane_tty.read_bytes() == b""
+
+
+def test_encode_follows_protocol_limits(plugin):
+    status = sys.modules[plugin.__name__ + ".status"]
+    assert status.encode("bogus") == b""
+    data = status.encode("blocked", kind="question", msg="a\tb\x07c " + "x" * 5000, rid="sub/x")
+    assert data.startswith(b"\x1b]7501;state=blocked:app=hermes:id=sub/x:kind=question:msg=")
+    assert data.endswith(b"\x1b\\") and len(data) <= 4096
+    msg = _b64.b64decode(data.split(b"msg=")[1][:-2]).decode()
+    assert len(msg) == 160 and msg.isprintable() and msg.endswith("…")
+    assert status.encode("working", kind="question") == b"\x1b]7501;state=working:app=hermes\x1b\\"  # kind only when blocked
+    assert status.encode("clear", rid="sub", msg="x") == b"\x1b]7501;state=clear:id=sub\x1b\\"
+    assert status.record_id("sub", "a b:c;" + "z" * 40) == "sub/" + "z" * 32
+
+
+def test_tty_lookup_cached_per_block(plugin, fake_rex, pane_tty):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._pre_tool_call(tool_name="terminal", session_id="s1")
+    plugin._post_tool_call(tool_name="terminal", session_id="s1")
+    drain(plugin)
+    lookups = [c for c in fake_rex.calls() if c["args"][:2] == ["block", "call"]]
+    assert len(lookups) == 1 and len(reports(pane_tty)) == 3
+
+
+# --- hermes rex doctor --------------------------------------------------------------------------
+
+def _doctor_mod(plugin, monkeypatch, listed):
+    import types
+    doctor = sys.modules[plugin.__name__ + ".doctor"]
+    state = {"listed": list(listed), "set": []}
+
+    def set_config_value(key, value):
+        state["set"].append((key, value))
+        state["listed"] = json.loads(value)
+
+    fake = types.SimpleNamespace(
+        load_config_readonly=lambda: {"terminal": {"client_env_passthrough": state["listed"]}},
+        set_config_value=set_config_value)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.SimpleNamespace(config=fake))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    return doctor, state
+
+
+def test_doctor_reports_and_fix_merges_existing_entries(plugin, monkeypatch):
+    doctor, state = _doctor_mod(plugin, monkeypatch, ["NVM_DIR"])
+    who = lambda rex: {"rex_version": "1", "block_id": "block:a"}
+    rows = doctor.checks(whoami=who)
+    assert [ok for ok, *_ in rows] == [True, True, True, True, False]
+    rows = doctor.checks(fix=True, whoami=who)
+    assert all(ok for ok, *_ in rows)
+    assert state["set"] == [("terminal.client_env_passthrough", json.dumps(["NVM_DIR", *plugin.REX_VARS]))]
+    doctor.checks(fix=True, whoami=who)
+    assert len(state["set"]) == 1  # nothing missing: no second write
+
+
+def test_doctor_flags_stale_block_and_outside_rex(plugin, monkeypatch):
+    doctor, _ = _doctor_mod(plugin, monkeypatch, list(plugin.REX_VARS))
+    rows = doctor.checks(whoami=lambda rex: {"rex_version": "1", "block_id": "block:other"})
+    assert [ok for ok, what, _ in rows if "matches" in what] == [False]
+    rows = doctor.checks(env={"PATH": os.environ["PATH"]}, whoami=lambda rex: {})
+    assert rows[0][0] is False and "Rex pane" in rows[0][1]
+
+
+def test_doctor_registered_as_cli_command(plugin):
+    seen = plugin.ctx_for_test.cli
+    assert seen["name"] == "rex" and seen["handler"] is sys.modules[plugin.__name__ + ".doctor"].run
+    import argparse
+    parser = argparse.ArgumentParser()
+    seen["setup"](parser)
+    assert parser.parse_args(["doctor", "--fix"]).fix is True
+    assert parser.parse_args([]).rex_command == "doctor"

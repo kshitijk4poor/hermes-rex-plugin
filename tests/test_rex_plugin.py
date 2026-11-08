@@ -162,6 +162,10 @@ def pane_tty(tmp_path):
     return path
 
 
+def _no_network(*a, **k):
+    raise AssertionError("a test tried to send a real Pushover request")
+
+
 @pytest.fixture
 def plugin(fake_rex, pane_tty, monkeypatch):
     name = f"rexplugin_{time.time_ns()}"
@@ -171,6 +175,12 @@ def plugin(fake_rex, pane_tty, monkeypatch):
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     monkeypatch.setattr(sys.modules[name + ".status"], "_tty_for_pid", lambda pid: str(pane_tty))
+    # Never reach the real world from a test: no Pushover (the developer's shell may export the
+    # keys), no macOS notification. Tests that check either stub them again themselves.
+    monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
+    monkeypatch.setattr(sys.modules[name + ".push"].urllib.request, "urlopen", _no_network)
+    monkeypatch.setattr(sys.modules[name + ".titles"], "notify", lambda *a: None)
     # Never read a real process's env (or write a real ~/.local/state record): no shell integration.
     monkeypatch.setattr(sys.modules[name + ".restore"], "_process_env", lambda pid: {})
     ctx = FakeCtx()

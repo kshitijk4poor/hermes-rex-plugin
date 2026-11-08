@@ -48,6 +48,15 @@ For Hermes sessions started (CLI or TUI) inside a Rex pane:
 - **Kanban panes.** Each kanban worker gets a pane in a `kanban` window that
   follows the worker's log.
 
+- **Chat restore.** With [rex-agent-restore](https://github.com/pattont/RexAgentRestore)
+  installed, a Hermes chat cut off by a Rex server restart comes back: on the
+  first prompt of the restored pane it runs `hermes --resume <session>` in the
+  same folder. The plugin saves each pane's session where rex-agent-restore
+  looks, since its own hooks can't see Hermes (sessions run in the gateway,
+  not in the pane). A chat you quit normally is forgotten. Panes without
+  rex-agent-restore's shell integration get nothing. Add flags with
+  `REX_AGENT_RESTORE_HERMES_ARGS` (e.g. `--tui`).
+
 New panes never take focus. A finished pane closes after
 `pane_linger_seconds`; press Enter in it to keep it.
 
@@ -86,6 +95,7 @@ All optional, under `plugins.entries.rex.settings` in `config.yaml`:
 | `visible_commands` | `true` | Tell the agent to run long-lived commands in Rex panes |
 | `subagent_panes` | `true` | A pane per subagent |
 | `kanban_panes` | `true` | A pane per kanban worker |
+| `restore_chats` | `true` | Save each pane's session for rex-agent-restore |
 | `pane_linger_seconds` | `300` | How long a finished pane stays open |
 | `debug` | `false` | Log every hook call (ids only, no message text) to `trace.jsonl` in the plugin's data dir |
 

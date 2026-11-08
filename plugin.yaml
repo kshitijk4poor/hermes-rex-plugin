@@ -1,5 +1,5 @@
 name: rex
-version: "1.5.0"
+version: "1.6.0"
 manifest_version: 2
 kind: standalone
 requires_hermes: ">=0.22.3"
@@ -37,5 +37,6 @@ config_schema:
   visible_commands: {type: bool, default: true, label: "Visible commands", description: "Tell the agent to run long-lived commands in Rex panes"}
   subagent_panes: {type: bool, default: true, label: "Subagent panes", description: "A pane per subagent following its transcript"}
   kanban_panes: {type: bool, default: true, label: "Kanban panes", description: "A pane per kanban worker following its log"}
+  restore_chats: {type: bool, default: true, label: "Chat restore", description: "Save each pane's session for rex-agent-restore, so Hermes chats resume after a Rex server restart"}
   pane_linger_seconds: {type: int, default: 300, label: "Pane linger (s)", description: "How long a finished follower pane stays open"}
   debug: {type: bool, default: false, label: "Debug trace", description: "Log every hook call (ids only) to trace.jsonl in the plugin data dir"}

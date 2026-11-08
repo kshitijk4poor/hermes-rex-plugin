@@ -17,6 +17,8 @@ inside Hermes can do:
 * **Label sync** — ``/title`` and ``/resume`` relabel the window; when the session ends the
   window gets back the label it had before.
 * **Visible panes** — subagents and kanban workers each get a pane following their transcript.
+* **Chat restore** — each pane's session id is saved where rex-agent-restore looks, so the chat
+  comes back (``hermes --resume``) when Rex restores the pane after a server restart.
 
 Hermes runs every session in one gateway process, so the shell's ``REX_*`` vars are NOT in
 ``os.environ`` here. They travel with the session as its client env, which requires::
@@ -37,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from . import doctor, rexcli
+from . import doctor, restore, rexcli
 from .panes import KanbanPanes, SubagentPanes, live_root
 from .rexcli import LOCAL_PLATFORMS, REX_VARS, Registry, Target, Worker, current_target
 from .status import BLOCKED_KIND, Reporter, one_line, record_id
@@ -56,6 +58,7 @@ DEFAULTS: dict[str, Any] = {
     "visible_commands": True,    # tell the agent to run servers/watchers/long jobs in Rex panes
     "subagent_panes": True,      # a pane per delegate_task child, following its transcript
     "kanban_panes": True,        # a pane per kanban worker, following its log
+    "restore_chats": True,       # save the pane's chat for rex-agent-restore (resumed after a Rex restart)
     "pane_linger_seconds": 300,  # how long a finished follower pane stays before it closes
     "debug": False,              # log every hook call to trace.jsonl in the plugin's data dir
 }
@@ -78,6 +81,7 @@ _reporter = Reporter()
 _last_reply: dict[str, str] = {}  # session id -> first line of the turn's reply, for its done report
 _last_saved: dict[str, Any] = {"key": None, "at": 0.0}
 _last_saved_lock = threading.Lock()
+_restore_saved: dict[str, str] = {}  # rex block -> session id last checked for rex-agent-restore
 
 
 def setting(key: str) -> Any:
@@ -301,8 +305,18 @@ def _pre_llm_call(session_id: str = "", platform: str = "", parent_session_id: s
         with _children_lock:
             _pending_end.pop(session_id, None)  # a new turn supersedes a held end state
         _remember(target, session_id)
+        _save_for_restore(target, session_id)
         _status(target, "busy", msg="thinking")
     return None  # a pre_llm_call return value is injected into the turn; we add nothing
+
+
+def _save_for_restore(target: Target, session_id: str) -> None:
+    """Record the pane's chat for rex-agent-restore once per (pane, session): a turn on a new,
+    resumed or compressed-into session id moves the record to it."""
+    if not session_id or not setting("restore_chats") or _restore_saved.get(target.block) == session_id:
+        return
+    _restore_saved[target.block] = session_id
+    _worker.submit(lambda: restore.save(target, session_id))
 
 
 def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None:

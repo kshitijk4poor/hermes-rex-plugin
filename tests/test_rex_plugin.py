@@ -171,6 +171,8 @@ def plugin(fake_rex, pane_tty, monkeypatch):
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     monkeypatch.setattr(sys.modules[name + ".status"], "_tty_for_pid", lambda pid: str(pane_tty))
+    # Never read a real process's env (or write a real ~/.local/state record): no shell integration.
+    monkeypatch.setattr(sys.modules[name + ".restore"], "_process_env", lambda pid: {})
     ctx = FakeCtx()
     mod.register(ctx)
     mod.ctx_for_test = ctx
@@ -805,7 +807,8 @@ def test_tty_lookup_cached_per_block(plugin, fake_rex, pane_tty):
     plugin._post_tool_call(tool_name="terminal", session_id="s1")
     drain(plugin)
     lookups = [c for c in fake_rex.calls() if c["args"][:2] == ["block", "call"]]
-    assert len(lookups) == 1 and len(reports(pane_tty)) == 3
+    # one for the tty (cached after), one for the session's chat-restore record (once per session)
+    assert len(lookups) == 2 and len(reports(pane_tty)) == 3
 
 
 # --- hermes rex doctor --------------------------------------------------------------------------
@@ -855,3 +858,75 @@ def test_doctor_registered_as_cli_command(plugin):
     seen["setup"](parser)
     assert parser.parse_args(["doctor", "--fix"]).fix is True
     assert parser.parse_args([]).rex_command == "doctor"
+
+
+# --- chat restore (rex-agent-restore records) ---------------------------------------------------
+
+@pytest.fixture
+def restore_env(plugin, tmp_path, monkeypatch):
+    """The pane's client process env, as rex-agent-restore's shell integration would set it."""
+    state = tmp_path / "rar-state"
+    env = {"REX_AGENT_RESTORE_SHELL_TOKEN": "111-222-333", "REX_AGENT_RESTORE_STATE_DIR": str(state)}
+    seen = []
+
+    def fake_env(pid):
+        seen.append(pid)
+        return dict(env)
+
+    monkeypatch.setattr(sys.modules[plugin.__name__ + ".restore"], "_process_env", fake_env)
+    return {"env": env, "record": state / "panes" / "a.json", "pids": seen}
+
+
+def test_turn_saves_record_rex_agent_restore_reads(plugin, restore_env):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    rec = json.loads(restore_env["record"].read_text())
+    assert rec["version"] == 1 and rec["block_id"] == "block:a" and rec["rex_session"] == "session:s"
+    assert rec["agent"] == "hermes" and rec["chat_id"] == "s1"
+    assert rec["shell_token"] == "111-222-333" and rec["agent_pid"] == 2
+    assert stat.S_IMODE(restore_env["record"].parent.stat().st_mode) == 0o700
+    plugin._pre_llm_call(session_id="s1", platform="cli")  # once per (pane, session)
+    drain(plugin)
+    assert restore_env["pids"] == [2]
+
+
+def test_new_session_in_pane_moves_record(plugin, restore_env):
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._pre_llm_call(session_id="s2", platform="cli")  # /new, /resume or a compression rotation
+    drain(plugin)
+    assert json.loads(restore_env["record"].read_text())["chat_id"] == "s2"
+
+
+def test_no_record_without_shell_integration_or_when_off(plugin, restore_env, fake_rex):
+    restore_env["env"].pop("REX_AGENT_RESTORE_SHELL_TOKEN")
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    drain(plugin)
+    assert not restore_env["record"].exists()
+    restore_env["env"]["REX_AGENT_RESTORE_SHELL_TOKEN"] = "t"
+    plugin.ctx_for_test.settings["restore_chats"] = False
+    plugin._pre_llm_call(session_id="s2", platform="cli")
+    drain(plugin)
+    assert not restore_env["record"].exists()
+
+
+def test_subagent_and_messaging_turns_save_nothing(plugin, restore_env):
+    plugin._pre_llm_call(session_id="child", platform="cli", parent_session_id="s1")
+    plugin._pre_llm_call(session_id="tg", platform="telegram")
+    drain(plugin)
+    assert not restore_env["record"].exists() and restore_env["pids"] == []
+
+
+def test_process_env_reads_only_known_names():
+    import importlib
+    # restore.py imports its package siblings, so load it through the plugin package.
+    pkg = f"rexplugin_env_{time.time_ns()}"
+    pspec = importlib.util.spec_from_file_location(pkg, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)])
+    mod = importlib.util.module_from_spec(pspec)
+    sys.modules[pkg] = mod
+    pspec.loader.exec_module(mod)
+    env = sys.modules[pkg + ".restore"]._process_env(os.getpid())
+    assert set(env) <= {"REX_AGENT_RESTORE_SHELL_TOKEN", "REX_AGENT_RESTORE_STATE_DIR",
+                        "REX_AGENT_RESTORE_DISABLE", "XDG_STATE_HOME", "HOME"}
+    assert env.get("HOME") == os.environ["HOME"]
+    for key in [k for k in sys.modules if k == pkg or k.startswith(pkg + ".")]:
+        del sys.modules[key]

@@ -41,7 +41,7 @@ from . import doctor, rexcli
 from .panes import KanbanPanes, SubagentPanes, live_root
 from .rexcli import LOCAL_PLATFORMS, REX_VARS, Registry, Target, Worker, current_target
 from .status import BLOCKED_KIND, Reporter, one_line, record_id
-from .titles import Titles, alert, slug
+from .titles import Titles, alert, push_turn_end, slug
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ DEFAULTS: dict[str, Any] = {
     "program_status": True,      # OSC 7501 reports: Rex's tab spinner, blocked/done marks, Done alert
     "status_titles": True,       # ● ? ✓ ■ ✗ prefix on the session's window label
     "alerts": "unfocused",       # unfocused | always | off
+    "push": "waiting",           # waiting | all | off: Pushover phone pushes while the pane is out of view
     "visible_commands": True,    # tell the agent to run servers/watchers/long jobs in Rex panes
     "subagent_panes": True,      # a pane per delegate_task child, following its transcript
     "kanban_panes": True,        # a pane per kanban worker, following its log
@@ -317,7 +318,14 @@ def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None
         word = "subagent" if running == 1 else "subagents"
         _report(target, "working", msg=f"waiting for {running} {word}")
         return
-    _status(target, state, msg=_end_message(session_id, state, kw.get("turn_exit_reason")))
+    msg = _end_message(session_id, state, kw.get("turn_exit_reason"))
+    _status(target, state, msg=msg)
+    _push_end(target, state, msg)
+
+
+def _push_end(target: Optional[Target], state: str, msg: str) -> None:
+    if target is not None and setting("push") == "all":
+        _worker.submit(lambda: push_turn_end(target, state, msg))
 
 
 def _end_message(session_id: str, state: str, reason: object = "") -> str:
@@ -362,9 +370,9 @@ def _on_human_input_request(kind: str = "", session_id: str = "", session_key: s
     if session_id in _registry.child_sessions:  # a subagent's approval: block its record, not ours
         _report_child(session_id, "blocked", target, kind=blocked_kind, msg=reason)
     _status(target, "waiting", kind=blocked_kind, msg=reason)
-    mode = setting("alerts")
-    if mode != "off":
-        _worker.submit(lambda: alert(target, mode, kind, prompt))
+    mode, push_on = setting("alerts"), setting("push") != "off"
+    if mode != "off" or push_on:
+        _worker.submit(lambda: alert(target, mode, kind, prompt, push_on=push_on))
 
 
 def _on_human_input_resolved(session_id: str = "", session_key: str = "", platform: str = "",
@@ -502,7 +510,9 @@ def _subagent_stop(parent_session_id: str = "", child_session_id: str = "", **_:
     _report(target, "clear", rid=_child_record(child_session_id))  # its result lands in the parent
     state = _child_stopped(parent_session_id, child_session_id)
     if state:
-        _status(target, state, msg=_end_message(parent_session_id, state))
+        msg = _end_message(parent_session_id, state)
+        _status(target, state, msg=msg)
+        _push_end(target, state, msg)
 
 
 def _on_kanban_worker_spawned(task_id: str = "", board: Optional[str] = None, assignee: str = "",

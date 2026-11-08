@@ -1,5 +1,5 @@
 name: rex
-version: "1.4.0"
+version: "1.5.0"
 manifest_version: 2
 kind: standalone
 requires_hermes: ">=0.22.3"
@@ -33,6 +33,7 @@ config_schema:
   program_status: {type: bool, default: true, label: "Program status", description: "Report working, blocked, done and error to Rex (OSC 7501): tab spinner, session picker marks, Rex's Done notification"}
   status_titles: {type: bool, default: true, label: "Status titles", description: "Prefix the window label with a status mark"}
   alerts: {type: str, default: unfocused, choices: [unfocused, always, "off"], label: "Alerts", description: "macOS notification when Hermes waits for you"}
+  push: {type: str, default: waiting, choices: [waiting, all, "off"], label: "Phone push", description: "Pushover push while the pane is out of view: when Hermes waits for you (waiting), or also when a turn finishes or fails (all). Needs PUSHOVER_USER_KEY and PUSHOVER_APP_TOKEN in ~/.hermes/.env"}
   visible_commands: {type: bool, default: true, label: "Visible commands", description: "Tell the agent to run long-lived commands in Rex panes"}
   subagent_panes: {type: bool, default: true, label: "Subagent panes", description: "A pane per subagent following its transcript"}
   kanban_panes: {type: bool, default: true, label: "Kanban panes", description: "A pane per kanban worker following its log"}

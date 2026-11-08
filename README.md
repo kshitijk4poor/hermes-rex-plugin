@@ -33,6 +33,10 @@ For Hermes sessions started (CLI or TUI) inside a Rex pane:
 - **Alerts.** A macOS notification when Hermes waits for a command approval,
   a clarify answer or a sudo password and its pane isn't in view (Rex isn't in
   front, or another pane is focused).
+- **Phone push (Pushover).** The same "waiting for you" events, pushed to your
+  phone while the pane is out of view. Set `push: all` to also get a push when
+  a turn finishes or fails. Put `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN`
+  in `~/.hermes/.env`. Without both keys nothing is sent.
 - **Label sync.** `/title <text>` and `/resume <session>` relabel the window.
   When the session ends, the window gets back the label it had before, and when
   the last Hermes chat in a Rex session ends, so does the session.
@@ -78,6 +82,7 @@ All optional, under `plugins.entries.rex.settings` in `config.yaml`:
 | `program_status` | `true` | OSC 7501 status reports to the pane |
 | `status_titles` | `true` | ● ? ✓ ■ ✗ mark on the window label |
 | `alerts` | `unfocused` | `unfocused`, `always` or `off` |
+| `push` | `waiting` | Pushover phone push: `waiting`, `all` (also finished/failed turns) or `off` |
 | `visible_commands` | `true` | Tell the agent to run long-lived commands in Rex panes |
 | `subagent_panes` | `true` | A pane per subagent |
 | `kanban_panes` | `true` | A pane per kanban worker |
@@ -123,7 +128,10 @@ The tests drive the hooks against a fake `rex`; no Hermes install is needed.
   the Hermes transcript or worker log it follows. Panes close after
   `pane_linger_seconds`.
 
-No network calls, no credentials, no telemetry. It writes only its own state
+- With both Pushover keys set, one HTTPS POST to `api.pushover.net` per push
+  (5-second timeout). Without them, nothing.
+
+No other network calls, no telemetry. It writes only its own state
 (`last_target`, plus `trace.jsonl` when `debug` is on) in its plugin data dir.
 `hermes rex doctor --fix` writes `terminal.client_env_passthrough` through
 Hermes's config writer. Requires Hermes 0.22.3 or newer (`terminal.client_env_passthrough`).

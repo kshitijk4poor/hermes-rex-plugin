@@ -547,6 +547,43 @@ def test_alert_skipped_when_pane_in_view_sent_otherwise(plugin, monkeypatch):
     assert len(sent) == 1
 
 
+def test_push_sent_when_out_of_view_and_keys_set(plugin, monkeypatch):
+    titles = sys.modules[plugin.__name__ + ".titles"]
+    push = sys.modules[plugin.__name__ + ".push"]
+    pushed = []
+    monkeypatch.setattr(titles, "notify", lambda *a: None)
+    monkeypatch.setattr(push, "send", lambda title, msg, **k: pushed.append((title, msg, k)) or True)
+    monkeypatch.setattr(titles, "_front_app", lambda: "Safari")
+    monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
+    plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="which one?")
+    drain(plugin)
+    assert pushed == []  # no keys, no push
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "u")
+    monkeypatch.setenv("PUSHOVER_APP_TOKEN", "t")
+    plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="which one?")
+    drain(plugin)
+    assert len(pushed) == 1 and pushed[0][0].startswith("Hermes has a question for you")
+    assert pushed[0][1] == "which one?" and pushed[0][2] == {"priority": 1}
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert len(pushed) == 1  # default "waiting": no push for a finished turn
+    plugin.ctx_for_test.settings["push"] = "all"
+    plugin._post_llm_call(session_id="s1", assistant_response="All tests pass.")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert pushed[-1][0].startswith("Hermes finished") and pushed[-1][1] == "All tests pass."
+    monkeypatch.setattr(titles, "_front_app", lambda: "Rex Beta")  # pane in view: nothing
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert len(pushed) == 2
+    plugin.ctx_for_test.settings.update(push="off")
+    monkeypatch.setattr(titles, "_front_app", lambda: "Safari")
+    plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="x")
+    drain(plugin)
+    assert len(pushed) == 2
+
+
 # --- subagent / kanban panes ------------------------------------------------------------------
 
 def _manifest(root: Path, goals):

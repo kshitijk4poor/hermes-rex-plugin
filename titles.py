@@ -13,7 +13,7 @@ import subprocess
 import threading
 from typing import Optional
 
-from . import rexcli
+from . import push, rexcli
 from .rexcli import Target
 
 logger = logging.getLogger(__name__)
@@ -160,10 +160,34 @@ _KIND_TEXT = {"approval": "wants approval to run a command", "clarify": "has a q
               "sudo": "needs your sudo password"}
 
 
-def alert(target: Target, mode: str, kind: str, prompt: str) -> None:
-    if mode == "off" or (mode != "always" and pane_in_view(target)):
-        return
+def _window_label(target: Target) -> str:
     win = rexcli.run_json(target, "window", "inspect", "--json") or {}
-    label = strip_status(str(win.get("label") or "")) or "Hermes"
+    return strip_status(str(win.get("label") or "")) or "Hermes"
+
+
+def alert(target: Target, mode: str, kind: str, prompt: str, *, push_on: bool = False) -> None:
+    """A desktop alert (per *mode*) and, when *push_on*, a phone push, both only while the pane is
+    out of view (``always`` skips that check for the desktop alert only)."""
+    in_view = pane_in_view(target)
+    desktop = mode == "always" or (mode != "off" and not in_view)
+    phone = push_on and not in_view and push.configured()
+    if not (desktop or phone):
+        return
+    label = _window_label(target)
     first = next((line.strip() for line in (prompt or "").splitlines() if line.strip()), "")
-    notify(f"Hermes {_KIND_TEXT.get(kind, 'needs you')}", label, first or "Switch to its Rex pane.")
+    title = f"Hermes {_KIND_TEXT.get(kind, 'needs you')}"
+    if desktop:
+        notify(title, label, first or "Switch to its Rex pane.")
+    if phone:
+        push.send(f"{title} ({label})", first or "Switch to its Rex pane.", priority=1)
+
+
+_END_TEXT = {"done": "finished", "failed": "failed"}
+
+
+def push_turn_end(target: Target, state: str, msg: str) -> None:
+    """A phone push when a turn finishes or fails while its pane is out of view."""
+    if state not in _END_TEXT or not push.configured() or pane_in_view(target):
+        return
+    label = _window_label(target)
+    push.send(f"Hermes {_END_TEXT[state]} ({label})", msg or _END_TEXT[state])

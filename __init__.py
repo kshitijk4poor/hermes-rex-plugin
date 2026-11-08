@@ -320,12 +320,12 @@ def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None
         return
     msg = _end_message(session_id, state, kw.get("turn_exit_reason"))
     _status(target, state, msg=msg)
-    _push_end(target, state, msg)
+    _push_end(target, state, msg, session_id)
 
 
-def _push_end(target: Optional[Target], state: str, msg: str) -> None:
+def _push_end(target: Optional[Target], state: str, msg: str, session_id: str) -> None:
     if target is not None and setting("push") == "all":
-        _worker.submit(lambda: push_turn_end(target, state, msg))
+        _worker.submit(lambda: push_turn_end(target, state, msg, session_id))
 
 
 def _end_message(session_id: str, state: str, reason: object = "") -> str:
@@ -372,7 +372,8 @@ def _on_human_input_request(kind: str = "", session_id: str = "", session_key: s
     _status(target, "waiting", kind=blocked_kind, msg=reason)
     mode, push_on = setting("alerts"), setting("push") != "off"
     if mode != "off" or push_on:
-        _worker.submit(lambda: alert(target, mode, kind, prompt, push_on=push_on))
+        _worker.submit(lambda: alert(target, mode, kind, prompt, push_on=push_on,
+                                         session_id=session_id))
 
 
 def _on_human_input_resolved(session_id: str = "", session_key: str = "", platform: str = "",
@@ -512,7 +513,7 @@ def _subagent_stop(parent_session_id: str = "", child_session_id: str = "", **_:
     if state:
         msg = _end_message(parent_session_id, state)
         _status(target, state, msg=msg)
-        _push_end(target, state, msg)
+        _push_end(target, state, msg, parent_session_id)
 
 
 def _on_kanban_worker_spawned(task_id: str = "", board: Optional[str] = None, assignee: str = "",

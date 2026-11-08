@@ -554,6 +554,7 @@ def test_push_sent_when_out_of_view_and_keys_set(plugin, monkeypatch):
     monkeypatch.setattr(titles, "notify", lambda *a: None)
     monkeypatch.setattr(push, "send", lambda title, msg, **k: pushed.append((title, msg, k)) or True)
     monkeypatch.setattr(titles, "_front_app", lambda: "Safari")
+    monkeypatch.setattr(titles, "_chat_title", lambda sid: "Fix login redirect" if sid == "s1" else "")
     monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)
     monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
     plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="which one?")
@@ -563,8 +564,9 @@ def test_push_sent_when_out_of_view_and_keys_set(plugin, monkeypatch):
     monkeypatch.setenv("PUSHOVER_APP_TOKEN", "t")
     plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="which one?")
     drain(plugin)
-    assert len(pushed) == 1 and pushed[0][0].startswith("Hermes has a question for you")
-    assert pushed[0][1] == "which one?" and pushed[0][2] == {"priority": 1}
+    assert len(pushed) == 1 and pushed[0][0] == "Fix login redirect"  # the chat's title
+    assert pushed[0][1].startswith("Hermes has a question for you: which one?")
+    assert pushed[0][2] == {"priority": 1}
     plugin._on_session_end(session_id="s1", platform="cli", completed=True)
     drain(plugin)
     assert len(pushed) == 1  # default "waiting": no push for a finished turn
@@ -572,7 +574,8 @@ def test_push_sent_when_out_of_view_and_keys_set(plugin, monkeypatch):
     plugin._post_llm_call(session_id="s1", assistant_response="All tests pass.")
     plugin._on_session_end(session_id="s1", platform="cli", completed=True)
     drain(plugin)
-    assert pushed[-1][0].startswith("Hermes finished") and pushed[-1][1] == "All tests pass."
+    assert pushed[-1][0] == "Fix login redirect"
+    assert pushed[-1][1].startswith("Hermes finished: All tests pass.")
     monkeypatch.setattr(titles, "_front_app", lambda: "Rex Beta")  # pane in view: nothing
     plugin._on_session_end(session_id="s1", platform="cli", completed=True)
     drain(plugin)

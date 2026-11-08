@@ -165,7 +165,37 @@ def _window_label(target: Target) -> str:
     return strip_status(str(win.get("label") or "")) or "Hermes"
 
 
-def alert(target: Target, mode: str, kind: str, prompt: str, *, push_on: bool = False) -> None:
+_DEFAULT_WINDOW_RE = re.compile(r"^Window [0-9a-f]{8}$")
+
+
+def _chat_title(session_id: str) -> str:
+    """The Hermes session's title ('' when unset or the state DB can't be read)."""
+    if not session_id:
+        return ""
+    try:
+        from hermes_state import SessionDB
+        return (SessionDB().get_session_title(session_id) or "").strip()
+    except Exception:
+        logger.debug("rex plugin: session title lookup failed", exc_info=True)
+        return ""
+
+
+def chat_name(target: Target, session_id: str) -> tuple[str, str]:
+    """``(chat, where)`` for a push: the chat's title (or its window label, or "Hermes") and its Rex
+    location as ``rex-session / window`` (default "Window 1a2b3c4d" labels left out)."""
+    window = _window_label(target)
+    window = "" if window == "Hermes" or _DEFAULT_WINDOW_RE.match(window) else window
+    session = rexcli.run_json(target, "session", "inspect", "--json") or {}
+    where = " / ".join(p for p in (str(session.get("label") or "").strip(), window) if p)
+    return _chat_title(session_id) or window or "Hermes", where
+
+
+def _push_body(status: str, text: str, where: str) -> str:
+    return f"{status}: {text}" + (f"\nRex: {where}" if where else "")
+
+
+def alert(target: Target, mode: str, kind: str, prompt: str, *, push_on: bool = False,
+          session_id: str = "") -> None:
     """A desktop alert (per *mode*) and, when *push_on*, a phone push, both only while the pane is
     out of view (``always`` skips that check for the desktop alert only)."""
     in_view = pane_in_view(target)
@@ -179,15 +209,17 @@ def alert(target: Target, mode: str, kind: str, prompt: str, *, push_on: bool = 
     if desktop:
         notify(title, label, first or "Switch to its Rex pane.")
     if phone:
-        push.send(f"{title} ({label})", first or "Switch to its Rex pane.", priority=1)
+        chat, where = chat_name(target, session_id)
+        push.send(chat, _push_body(f"Hermes {_KIND_TEXT.get(kind, 'needs you')}", first or "switch to its Rex pane",
+                                   where), priority=1)
 
 
 _END_TEXT = {"done": "finished", "failed": "failed"}
 
 
-def push_turn_end(target: Target, state: str, msg: str) -> None:
+def push_turn_end(target: Target, state: str, msg: str, session_id: str = "") -> None:
     """A phone push when a turn finishes or fails while its pane is out of view."""
     if state not in _END_TEXT or not push.configured() or pane_in_view(target):
         return
-    label = _window_label(target)
-    push.send(f"Hermes {_END_TEXT[state]} ({label})", msg or _END_TEXT[state])
+    chat, where = chat_name(target, session_id)
+    push.send(chat, _push_body(f"Hermes {_END_TEXT[state]}", msg or _END_TEXT[state], where))

@@ -54,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
     "program_status": True,      # OSC 7501 reports: Rex's tab spinner, blocked/done marks, Done alert
     "status_titles": True,       # ● ? ✓ ■ ✗ prefix on the session's window label
     "alerts": "unfocused",       # unfocused | always | off
-    "push": "waiting",           # waiting | all | off: Pushover phone pushes while the pane is out of view
+    "push": "waiting",           # waiting | done | all | off: Pushover phone pushes while the pane is out of view
     "visible_commands": True,    # tell the agent to run servers/watchers/long jobs in Rex panes
     "subagent_panes": True,      # a pane per delegate_task child, following its transcript
     "kanban_panes": True,        # a pane per kanban worker, following its log
@@ -347,7 +347,7 @@ def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None
 
 
 def _push_end(target: Optional[Target], state: str, msg: str, session_id: str) -> None:
-    if target is not None and setting("push") == "all":
+    if target is not None and setting("push") in ("all", "done"):
         _worker.submit(lambda: push_turn_end(target, state, msg, session_id))
 
 
@@ -393,7 +393,7 @@ def _on_human_input_request(kind: str = "", session_id: str = "", session_key: s
     if session_id in _registry.child_sessions:  # a subagent's approval: block its record, not ours
         _report_child(session_id, "blocked", target, kind=blocked_kind, msg=reason)
     _status(target, "waiting", kind=blocked_kind, msg=reason)
-    mode, push_on = setting("alerts"), setting("push") != "off"
+    mode, push_on = setting("alerts"), setting("push") in ("waiting", "all")
     if mode != "off" or push_on:
         _worker.submit(lambda: alert(target, mode, kind, prompt, push_on=push_on,
                                          session_id=session_id))

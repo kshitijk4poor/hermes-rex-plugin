@@ -615,11 +615,19 @@ def test_push_sent_when_out_of_view_and_keys_set(plugin, monkeypatch):
     plugin._on_session_end(session_id="s1", platform="cli", completed=True)
     drain(plugin)
     assert len(pushed) == 2
+    plugin.ctx_for_test.settings.update(push="done")  # turn ends only: an approval sends nothing
+    monkeypatch.setattr(titles, "_front_app", lambda: "Safari")
+    plugin._on_human_input_request(kind="approval", session_id="s1", platform="cli", prompt="git push")
+    drain(plugin)
+    assert len(pushed) == 2
+    plugin._on_session_end(session_id="s1", platform="cli", failed=True, turn_exit_reason="boom")
+    drain(plugin)
+    assert len(pushed) == 3
     plugin.ctx_for_test.settings.update(push="off")
     monkeypatch.setattr(titles, "_front_app", lambda: "Safari")
     plugin._on_human_input_request(kind="clarify", session_id="s1", platform="cli", prompt="x")
     drain(plugin)
-    assert len(pushed) == 2
+    assert len(pushed) == 3
 
 
 # --- subagent / kanban panes ------------------------------------------------------------------

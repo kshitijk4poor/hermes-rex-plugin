@@ -34,8 +34,9 @@ For Hermes sessions started (CLI or TUI) inside a Rex pane:
   a clarify answer or a sudo password and its pane isn't in view (Rex isn't in
   front, or another pane is focused).
 - **Phone push (Pushover).** The same "waiting for you" events, pushed to your
-  phone while the pane is out of view. Set `push: all` to also get a push when
-  a turn finishes or fails. Put `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN`
+  phone while the pane is out of view. Set `push: done` to get a push only when
+  a turn finishes or fails (no approval/question pushes), or `push: all` for
+  both. Put `PUSHOVER_USER_KEY` and `PUSHOVER_APP_TOKEN`
   in `~/.hermes/.env`. Without both keys nothing is sent.
 - **Label sync.** `/title <text>` and `/resume <session>` relabel the window.
   When the session ends, the window gets back the label it had before, and when
@@ -91,7 +92,7 @@ All optional, under `plugins.entries.rex.settings` in `config.yaml`:
 | `program_status` | `true` | OSC 7501 status reports to the pane |
 | `status_titles` | `true` | ● ? ✓ ■ ✗ mark on the window label |
 | `alerts` | `unfocused` | `unfocused`, `always` or `off` |
-| `push` | `waiting` | Pushover phone push: `waiting`, `all` (also finished/failed turns) or `off` |
+| `push` | `waiting` | Pushover phone push: `waiting` (approvals, questions, sudo), `done` (only finished/failed turns), `all` (both) or `off` |
 | `visible_commands` | `true` | Tell the agent to run long-lived commands in Rex panes |
 | `subagent_panes` | `true` | A pane per subagent |
 | `kanban_panes` | `true` | A pane per kanban worker |

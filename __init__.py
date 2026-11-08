@@ -79,6 +79,12 @@ _subagents = SubagentPanes()
 _kanban = KanbanPanes()
 _reporter = Reporter()
 _last_reply: dict[str, str] = {}  # session id -> first line of the turn's reply, for its done report
+# Sessions whose turn has ended (on_session_end) and whose next turn hasn't started (pre_llm_call).
+# The background memory/skill review forks the agent under the same session id after the turn ends,
+# with persistence off: its tool calls fire pre/post_tool_call but never pre_llm_call or
+# on_session_end, so without this its "working" reports would sit over the turn's "done" for good.
+# Keyed on "ended" rather than "in a turn" because compression changes the session id mid-turn.
+_idle_sessions: set[str] = set()
 _last_saved: dict[str, Any] = {"key": None, "at": 0.0}
 _last_saved_lock = threading.Lock()
 _restore_saved: dict[str, str] = {}  # rex block -> session id last checked for rex-agent-restore
@@ -301,6 +307,7 @@ def _pre_llm_call(session_id: str = "", platform: str = "", parent_session_id: s
         _report_child(session_id, "working", msg="thinking")
         return None
     target = _target_for(platform=platform)
+    _idle_sessions.discard(session_id)
     if target is not None:
         with _children_lock:
             _pending_end.pop(session_id, None)  # a new turn supersedes a held end state
@@ -325,6 +332,8 @@ def _on_session_end(session_id: str = "", platform: str = "", **kw: Any) -> None
         return
     state = next((s for flag, s in _STATUS_FOR_END if kw.get(flag)), "done")
     target = _target_for(session_id=session_id, platform=platform)
+    if target is not None and session_id:
+        _idle_sessions.add(session_id)  # until its next pre_llm_call or its finalize
     running = state == "done" and _running_children(session_id)
     if running:
         with _children_lock:
@@ -367,7 +376,7 @@ def _pre_tool_call(tool_name: str = "", session_id: str = "", **_: Any) -> None:
         return None
     if session_id in _registry.child_sessions:
         _report_child(session_id, "working", msg=tool_name)
-    else:
+    elif session_id not in _idle_sessions:  # a post-turn review fork's call is not this pane's work
         target = current_target()
         if target is not None:
             _report(target, "working", msg=tool_name)
@@ -404,6 +413,8 @@ def _post_tool_call(tool_name: str = "", args: Any = None, session_id: str = "",
     child = session_id in _registry.child_sessions
     if child:
         _report_child(session_id, "working", msg="thinking")
+        return
+    if session_id in _idle_sessions:  # a post-turn review fork's call is not this pane's work
         return
     command = str(args.get("command") or "") if isinstance(args, dict) else ""
     renamed = tool_name == "terminal" and "rex" in command and "rename" in command
@@ -489,6 +500,7 @@ def _session_left(session_id: str, target: Target) -> None:
         _children.pop(session_id, None)
         _pending_end.pop(session_id, None)
     _last_reply.pop(session_id, None)
+    _idle_sessions.discard(session_id)
     _report(target, "clear", rid="sub")  # any subagent records still shown in this pane
     with _pending_lock:  # one decision with a concurrent /resume (see _pre_command)
         _registry.forget(session_id)

@@ -345,6 +345,39 @@ def test_stale_child_stops_holding_done(plugin, fake_rex, monkeypatch):
     assert fake_rex.label() == "✓ fix-login"
 
 
+def test_tool_calls_after_the_turn_ended_keep_the_end_mark(plugin, fake_rex, pane_tty):
+    # The background memory/skill review forks the agent under the SAME session id after the turn
+    # ends, with persistence off: its tool calls fire pre/post_tool_call, but it never fires
+    # pre_llm_call or on_session_end. Those calls must not put ● back over the turn's ✓.
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
+    before = len(reports(pane_tty))
+    plugin._pre_tool_call(tool_name="skill_manage", session_id="s1")
+    plugin._post_tool_call(tool_name="skill_manage", args={}, session_id="s1")
+    drain(plugin)
+    assert fake_rex.label() == "✓ fix-login"
+    assert reports(pane_tty)[before:] == []  # no "working" record over the done one
+    plugin._pre_llm_call(session_id="s1", platform="cli")  # the next real turn still marks busy
+    plugin._pre_tool_call(tool_name="terminal", session_id="s1")
+    drain(plugin)
+    assert fake_rex.label() == "● fix-login"
+    assert reports(pane_tty)[-1]["msg"] == "terminal"
+
+
+def test_idle_set_only_holds_rex_sessions_and_is_cleared(plugin, fake_rex, monkeypatch):
+    plugin._on_session_end(session_id="tg", platform="telegram", completed=True)  # not our pane
+    assert "tg" not in plugin._idle_sessions
+    plugin._pre_llm_call(session_id="s1", platform="cli")
+    plugin._on_session_end(session_id="s1", platform="cli", completed=True)
+    assert "s1" in plugin._idle_sessions
+    monkeypatch.delenv("REX_SESSION")  # finalize runs outside the turn
+    plugin._on_session_finalize(session_id="s1", platform="cli")
+    drain(plugin)
+    assert "s1" not in plugin._idle_sessions
+
+
 def test_model_rename_keeps_status_mark(plugin, fake_rex):
     plugin._pre_llm_call(session_id="s1", platform="cli")
     drain(plugin)
